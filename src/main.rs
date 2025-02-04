@@ -16,15 +16,16 @@ pub enum OpenaiRole {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct TextContent {
-    role: OpenaiRole,
-    content: String,
+#[serde(tag = "type")]
+pub enum Content {
+    #[serde(rename = "text")]
+    Text { text: String },
 }
 
 #[derive(Debug, Deserialize)]
 pub struct OpenaiMessage {
     pub role: OpenaiRole,
-    #[serde(deserialize_with = "string_or_struct")]
+    #[serde(deserialize_with = "string_or_array")]
     pub content: OpenaiContent,
 }
 
@@ -32,7 +33,7 @@ pub struct OpenaiMessage {
 #[serde(untagged)]
 pub enum OpenaiContent {
     String(String),
-    Array(Vec<TextContent>),
+    Array(Vec<Content>),
 }
 
 impl FromStr for OpenaiContent {
@@ -54,17 +55,13 @@ fn main() {
     let message: OpenaiMessage = serde_json::from_str(json_string).unwrap();
     println!("String content: {:?}", message);
 
-    // Test case 2: Array content
+    // Test case 2: Array content with Text type
     let json_array = r#"{
         "role": "user",
         "content": [
             {
-                "role": "system",
-                "content": "You are a helpful assistant."
-            },
-            {
-                "role": "user",
-                "content": "What is the weather like?"
+                "type": "text",
+                "text": "What is the weather like?"
             }
         ]
     }"#;
@@ -99,12 +96,8 @@ fn main() {
                 "role": "user",
                 "content": [
                     {
-                        "role": "system",
-                        "content": "You are a helpful assistant."
-                    },
-                    {
-                        "role": "user",
-                        "content": "Tell me about programming."
+                        "type": "text",
+                        "text": "Tell me about programming."
                     }
                 ]
             }
@@ -187,14 +180,14 @@ pub struct ChatCompletionsRequest {
     pub user: Option<String>,
 }
 
-fn string_or_struct<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+fn string_or_array<'de, T, D>(deserializer: D) -> Result<T, D::Error>
 where
     T: Deserialize<'de> + FromStr<Err = Void>,
     D: Deserializer<'de>,
 {
-    struct StringOrStruct<T>(PhantomData<fn() -> T>);
+    struct StringOrArray<T>(PhantomData<fn() -> T>);
 
-    impl<'de, T> Visitor<'de> for StringOrStruct<T>
+    impl<'de, T> Visitor<'de> for StringOrArray<T>
     where
         T: Deserialize<'de> + FromStr<Err = Void>,
     {
@@ -219,7 +212,7 @@ where
         }
     }
 
-    deserializer.deserialize_any(StringOrStruct(PhantomData))
+    deserializer.deserialize_any(StringOrArray(PhantomData))
 }
 
 async fn chat_completions(Json(payload): Json<ChatCompletionsRequest>) -> &'static str {
