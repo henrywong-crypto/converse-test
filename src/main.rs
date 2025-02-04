@@ -9,7 +9,7 @@ use void::Void;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum OpenaiRole {
+pub enum Role {
     System,
     Assistant,
     User,
@@ -23,30 +23,37 @@ pub enum Content {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct OpenaiMessage {
-    pub role: OpenaiRole,
+pub struct Message {
+    pub role: Role,
     #[serde(deserialize_with = "string_or_array")]
-    pub content: OpenaiContent,
+    pub content: MessageContent,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-pub enum OpenaiContent {
+pub enum MessageContent {
     String(String),
     Array(Vec<Content>),
 }
 
-impl FromStr for OpenaiContent {
+impl FromStr for MessageContent {
     type Err = Void;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(OpenaiContent::String(s.to_string()))
+        Ok(MessageContent::String(s.to_string()))
     }
 }
 
-fn main() {
-    // Start the server
-    start_server();
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
+
+    let app = Router::new().route("/chat/completions", post(chat_completions));
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,7 +62,7 @@ pub struct ChatCompletionsRequest {
     /// See the model endpoint compatibility table for details on which models work with the Chat API.
     pub model: String,
     /// The messages to generate chat completions for, in the chat format.
-    pub messages: Vec<OpenaiMessage>,
+    pub messages: Vec<Message>,
     /// What sampling temperature to use, between 0 and 2.
     /// Higher values like 0.8 will make the output more random,
     /// while lower values like 0.2 will make it more focused and deterministic.
@@ -157,18 +164,6 @@ async fn chat_completions(Json(payload): Json<ChatCompletionsRequest>) -> &'stat
     "Hello world"
 }
 
-#[tokio::main]
-async fn start_server() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-
-    let app = Router::new().route("/chat/completions", post(chat_completions));
-
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    axum::serve(listener, app).await?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,8 +175,8 @@ mod tests {
             "content": "Hello, how are you?"
         }"#;
 
-        let message: OpenaiMessage = serde_json::from_str(json_string).unwrap();
-        if let OpenaiContent::String(content) = message.content {
+        let message: Message = serde_json::from_str(json_string).unwrap();
+        if let MessageContent::String(content) = message.content {
             assert_eq!(content, "Hello, how are you?");
         } else {
             panic!("Expected String content");
@@ -200,8 +195,8 @@ mod tests {
             ]
         }"#;
 
-        let message: OpenaiMessage = serde_json::from_str(json_array).unwrap();
-        if let OpenaiContent::Array(content) = message.content {
+        let message: Message = serde_json::from_str(json_array).unwrap();
+        if let MessageContent::Array(content) = message.content {
             assert_eq!(content.len(), 1);
             if let Content::Text { text } = &content[0] {
                 assert_eq!(text, "What is the weather like?");
@@ -259,7 +254,7 @@ mod tests {
         assert_eq!(request.messages.len(), 1);
         assert_eq!(request.temperature, Some(0.7));
 
-        if let OpenaiContent::Array(content) = &request.messages[0].content {
+        if let MessageContent::Array(content) = &request.messages[0].content {
             assert_eq!(content.len(), 1);
             if let Content::Text { text } = &content[0] {
                 assert_eq!(text, "Tell me about programming.");
