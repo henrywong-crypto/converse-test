@@ -44,70 +44,7 @@ impl FromStr for OpenaiContent {
     }
 }
 
-// Example usage and tests
 fn main() {
-    // Test case 1: String content
-    let json_string = r#"{
-        "role": "user",
-        "content": "Hello, how are you?"
-    }"#;
-
-    let message: OpenaiMessage = serde_json::from_str(json_string).unwrap();
-    println!("String content: {:?}", message);
-
-    // Test case 2: Array content with Text type
-    let json_array = r#"{
-        "role": "user",
-        "content": [
-            {
-                "type": "text",
-                "text": "What is the weather like?"
-            }
-        ]
-    }"#;
-
-    let message: OpenaiMessage = serde_json::from_str(json_array).unwrap();
-    println!("Array content: {:?}", message);
-
-    // Test case 3: Full chat request with string content
-    let chat_request = r#"{
-        "model": "gpt-4",
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a helpful assistant."
-            },
-            {
-                "role": "user",
-                "content": "Tell me about Rust."
-            }
-        ],
-        "temperature": 0.7
-    }"#;
-
-    let request: ChatCompletionsRequest = serde_json::from_str(chat_request).unwrap();
-    println!("Chat request: {:?}", request);
-
-    // Test case 4: Full chat request with array content
-    let chat_request_array = r#"{
-        "model": "gpt-4",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Tell me about programming."
-                    }
-                ]
-            }
-        ],
-        "temperature": 0.7
-    }"#;
-
-    let request: ChatCompletionsRequest = serde_json::from_str(chat_request_array).unwrap();
-    println!("Chat request with array content: {:?}", request);
-
     // Start the server
     start_server();
 }
@@ -230,4 +167,107 @@ async fn start_server() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_string_content_deserialization() {
+        let json_string = r#"{
+            "role": "user",
+            "content": "Hello, how are you?"
+        }"#;
+
+        let message: OpenaiMessage = serde_json::from_str(json_string).unwrap();
+        if let OpenaiContent::String(content) = message.content {
+            assert_eq!(content, "Hello, how are you?");
+        } else {
+            panic!("Expected String content");
+        }
+    }
+
+    #[test]
+    fn test_array_content_deserialization() {
+        let json_array = r#"{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "What is the weather like?"
+                }
+            ]
+        }"#;
+
+        let message: OpenaiMessage = serde_json::from_str(json_array).unwrap();
+        if let OpenaiContent::Array(content) = message.content {
+            assert_eq!(content.len(), 1);
+            if let Content::Text { text } = &content[0] {
+                assert_eq!(text, "What is the weather like?");
+            } else {
+                panic!("Expected Text content");
+            }
+        } else {
+            panic!("Expected Array content");
+        }
+    }
+
+    #[test]
+    fn test_chat_request_with_string_content() {
+        let chat_request = r#"{
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                },
+                {
+                    "role": "user",
+                    "content": "Tell me about Rust."
+                }
+            ],
+            "temperature": 0.7
+        }"#;
+
+        let request: ChatCompletionsRequest = serde_json::from_str(chat_request).unwrap();
+        assert_eq!(request.model, "gpt-4");
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn test_chat_request_with_array_content() {
+        let chat_request_array = r#"{
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Tell me about programming."
+                        }
+                    ]
+                }
+            ],
+            "temperature": 0.7
+        }"#;
+
+        let request: ChatCompletionsRequest = serde_json::from_str(chat_request_array).unwrap();
+        assert_eq!(request.model, "gpt-4");
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.temperature, Some(0.7));
+
+        if let OpenaiContent::Array(content) = &request.messages[0].content {
+            assert_eq!(content.len(), 1);
+            if let Content::Text { text } = &content[0] {
+                assert_eq!(text, "Tell me about programming.");
+            } else {
+                panic!("Expected Text content");
+            }
+        } else {
+            panic!("Expected Array content");
+        }
+    }
 }
