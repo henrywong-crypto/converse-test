@@ -23,7 +23,7 @@ pub enum Content {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Message {
+pub struct OpenaiMessage {
     pub role: Role,
     #[serde(deserialize_with = "string_or_array")]
     pub content: MessageContent,
@@ -62,7 +62,7 @@ pub struct ChatCompletionsRequest {
     /// See the model endpoint compatibility table for details on which models work with the Chat API.
     pub model: String,
     /// The messages to generate chat completions for, in the chat format.
-    pub messages: Vec<Message>,
+    pub messages: Vec<OpenaiMessage>,
     /// What sampling temperature to use, between 0 and 2.
     /// Higher values like 0.8 will make the output more random,
     /// while lower values like 0.2 will make it more focused and deterministic.
@@ -175,7 +175,7 @@ mod tests {
             "content": "Hello, how are you?"
         }"#;
 
-        let message: Message = serde_json::from_str(json_string).unwrap();
+        let message: OpenaiMessage = serde_json::from_str(json_string).unwrap();
         if let MessageContent::String(content) = message.content {
             assert_eq!(content, "Hello, how are you?");
         } else {
@@ -195,7 +195,7 @@ mod tests {
             ]
         }"#;
 
-        let message: Message = serde_json::from_str(json_array).unwrap();
+        let message: OpenaiMessage = serde_json::from_str(json_array).unwrap();
         if let MessageContent::Array(content) = message.content {
             assert_eq!(content.len(), 1);
             if let Content::Text { text } = &content[0] {
