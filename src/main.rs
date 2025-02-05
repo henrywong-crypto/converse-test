@@ -1,6 +1,7 @@
 use axum::{Json, Router, routing::post};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
+use aws_sdk_bedrockruntime::types::{Message, ContentBlock, ConversationRole};
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
@@ -160,7 +161,37 @@ where
 }
 
 async fn chat_completions(Json(payload): Json<ChatCompletionsRequest>) -> &'static str {
-    println!("{:?}", payload);
+    // Convert each OpenaiMessage to aws_sdk_bedrockruntime::types::Message
+    let converted_messages = payload.messages.iter()
+        .filter(|msg| matches!(msg.role, Role::Assistant | Role::User))
+        .map(|msg| {
+        let content_blocks = match &msg.content {
+            MessageContent::String(text) => vec![ContentBlock::Text(text.clone())],
+            MessageContent::Array(contents) => contents.iter()
+                .filter_map(|content| {
+                    if let Content::Text { text } = content {
+                        Some(ContentBlock::Text(text.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<ContentBlock>>()
+        };
+
+        Message::builder()
+            .role(match msg.role {
+                Role::System => unreachable!("System messages should have been filtered out"),
+                Role::Assistant => ConversationRole::Assistant,
+                Role::User => ConversationRole::User,
+            })
+            .set_content(Some(content_blocks))
+            .build()
+            .map_err(|_| "failed to build message")
+    });
+
+    // Collect results
+    let result: Result<Vec<Message>, &str> = converted_messages.collect();
+    println!("{:?}", result);
     "Hello world"
 }
 
