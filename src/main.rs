@@ -160,16 +160,12 @@ where
     deserializer.deserialize_any(StringOrArray(PhantomData))
 }
 
-async fn chat_completions(Json(payload): Json<ChatCompletionsRequest>) -> &'static str {
-    // Convert each OpenaiMessage to aws_sdk_bedrockruntime::types::Message
-    // Split messages into system and non-system
-    let (system_messages, non_system_messages): (Vec<_>, Vec<_>) = payload
-        .messages
+fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec<Message>) {
+    let (system_messages, non_system_messages): (Vec<_>, Vec<_>) = messages
         .iter()
         .partition(|msg| matches!(msg.role, Role::System));
 
-    // Convert system messages to SystemContentBlock format
-    let system_content_blocks: Vec<SystemContentBlock> = system_messages
+    let system_blocks = system_messages
         .iter()
         .flat_map(|msg| match &msg.content {
             MessageContent::String(text) => vec![SystemContentBlock::Text(text.clone())],
@@ -186,35 +182,47 @@ async fn chat_completions(Json(payload): Json<ChatCompletionsRequest>) -> &'stat
         })
         .collect();
 
-    let converted_messages = non_system_messages.iter().map(|msg| {
-        let content_blocks = match &msg.content {
-            MessageContent::String(text) => vec![ContentBlock::Text(text.clone())],
-            MessageContent::Array(contents) => contents
-                .iter()
-                .filter_map(|content| {
-                    if let Content::Text { text } = content {
-                        Some(ContentBlock::Text(text.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<ContentBlock>>(),
-        };
+    let non_system_messages = non_system_messages
+        .iter()
+        .filter_map(|msg| {
+            let content_blocks = match &msg.content {
+                MessageContent::String(text) => vec![ContentBlock::Text(text.clone())],
+                MessageContent::Array(contents) => contents
+                    .iter()
+                    .filter_map(|content| {
+                        if let Content::Text { text } = content {
+                            Some(ContentBlock::Text(text.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<ContentBlock>>(),
+            };
 
-        Message::builder()
-            .role(match msg.role {
+            let role = match msg.role {
                 Role::System => unreachable!("System messages should have been filtered out"),
                 Role::Assistant => ConversationRole::Assistant,
                 Role::User => ConversationRole::User,
-            })
-            .set_content(Some(content_blocks))
-            .build()
-            .map_err(|_| "failed to build message")
-    });
+            };
 
-    // Collect results
-    let result: Result<Vec<Message>, &str> = converted_messages.collect();
-    println!("{:?}", result);
+            Message::builder()
+                .role(role)
+                .set_content(Some(content_blocks))
+                .build()
+                .ok()
+        })
+        .collect();
+
+    (system_blocks, non_system_messages)
+}
+
+async fn chat_completions(Json(payload): Json<ChatCompletionsRequest>) -> &'static str {
+    // Convert each OpenaiMessage to aws_sdk_bedrockruntime::types::Message
+    let (system_content_blocks, messages) = process_messages(&payload.messages);
+
+    // Print results for debugging
+    println!("System blocks: {:?}", system_content_blocks);
+    println!("Messages: {:?}", messages);
     "Hello world"
 }
 
@@ -283,6 +291,54 @@ mod tests {
         assert_eq!(request.model, "gpt-4");
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn test_process_messages() {
+        let messages = vec![
+            OpenaiMessage {
+                role: Role::System,
+                content: MessageContent::String("System instruction".to_string()),
+            },
+            OpenaiMessage {
+                role: Role::User,
+                content: MessageContent::String("User message".to_string()),
+            },
+            OpenaiMessage {
+                role: Role::Assistant,
+                content: MessageContent::String("Assistant message".to_string()),
+            },
+        ];
+
+        let (system_blocks, converted_messages) = process_messages(&messages);
+
+        // Check system blocks
+        assert_eq!(system_blocks.len(), 1);
+        assert!(
+            matches!(&system_blocks[0], SystemContentBlock::Text(text) if text == "System instruction")
+        );
+
+        // Check converted messages
+        assert_eq!(converted_messages.len(), 2);
+        let user_message = &converted_messages[0];
+        let assistant_message = &converted_messages[1];
+
+        // Verify user message
+        assert!(matches!(user_message.role(), ConversationRole::User));
+        let user_content = user_message.content();
+        assert_eq!(user_content.len(), 1);
+        assert!(matches!(&user_content[0], ContentBlock::Text(text) if text == "User message"));
+
+        // Verify assistant message
+        assert!(matches!(
+            assistant_message.role(),
+            ConversationRole::Assistant
+        ));
+        let assistant_content = assistant_message.content();
+        assert_eq!(assistant_content.len(), 1);
+        assert!(
+            matches!(&assistant_content[0], ContentBlock::Text(text) if text == "Assistant message")
+        );
     }
 
     #[test]
