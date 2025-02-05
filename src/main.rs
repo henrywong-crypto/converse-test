@@ -1,7 +1,7 @@
+use aws_sdk_bedrockruntime::types::{ContentBlock, ConversationRole, Message, SystemContentBlock};
 use axum::{Json, Router, routing::post};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use aws_sdk_bedrockruntime::types::{Message, ContentBlock, ConversationRole};
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
@@ -162,12 +162,35 @@ where
 
 async fn chat_completions(Json(payload): Json<ChatCompletionsRequest>) -> &'static str {
     // Convert each OpenaiMessage to aws_sdk_bedrockruntime::types::Message
-    let converted_messages = payload.messages.iter()
-        .filter(|msg| matches!(msg.role, Role::Assistant | Role::User))
-        .map(|msg| {
+    // Split messages into system and non-system
+    let (system_messages, non_system_messages): (Vec<_>, Vec<_>) = payload
+        .messages
+        .iter()
+        .partition(|msg| matches!(msg.role, Role::System));
+
+    // Convert system messages to SystemContentBlock format
+    let system_content_blocks: Vec<SystemContentBlock> = system_messages
+        .iter()
+        .flat_map(|msg| match &msg.content {
+            MessageContent::String(text) => vec![SystemContentBlock::Text(text.clone())],
+            MessageContent::Array(contents) => contents
+                .iter()
+                .filter_map(|content| {
+                    if let Content::Text { text } = content {
+                        Some(SystemContentBlock::Text(text.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<SystemContentBlock>>(),
+        })
+        .collect();
+
+    let converted_messages = non_system_messages.iter().map(|msg| {
         let content_blocks = match &msg.content {
             MessageContent::String(text) => vec![ContentBlock::Text(text.clone())],
-            MessageContent::Array(contents) => contents.iter()
+            MessageContent::Array(contents) => contents
+                .iter()
                 .filter_map(|content| {
                     if let Content::Text { text } = content {
                         Some(ContentBlock::Text(text.clone()))
@@ -175,7 +198,7 @@ async fn chat_completions(Json(payload): Json<ChatCompletionsRequest>) -> &'stat
                         None
                     }
                 })
-                .collect::<Vec<ContentBlock>>()
+                .collect::<Vec<ContentBlock>>(),
         };
 
         Message::builder()
