@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.95"
+aws-config = "1.5.16"
 aws-sdk-bedrockruntime = "1.73.0"
 axum = "0.8.1"
 serde = { version = "1.0.217", features = ["derive"] }

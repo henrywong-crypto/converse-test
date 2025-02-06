@@ -1,4 +1,8 @@
-use aws_sdk_bedrockruntime::types::{ContentBlock, ConversationRole, Message, SystemContentBlock};
+use aws_config::BehaviorVersion;
+use aws_sdk_bedrockruntime::{
+    Client,
+    types::{ContentBlock, ConversationRole, Message, SystemContentBlock},
+};
 use axum::{Json, Router, routing::post};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -7,7 +11,6 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
 use void::Void;
-use tracing;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -178,7 +181,7 @@ fn process_content(content: &MessageContent) -> Vec<ContentBlock> {
 }
 
 fn process_system_content(content: &MessageContent) -> Vec<SystemContentBlock> {
-     match content {
+    match content {
         MessageContent::String(text) => vec![SystemContentBlock::Text(text.clone())],
         MessageContent::Array(contents) => contents
             .iter()
@@ -212,7 +215,7 @@ fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec
                 Role::System => {
                     tracing::warn!("System role encountered in non-system messages");
                     None
-                },
+                }
                 Role::Assistant => Some(ConversationRole::Assistant),
                 Role::User => Some(ConversationRole::User),
             }?;
@@ -228,13 +231,34 @@ fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec
     (system_blocks, non_system_messages)
 }
 
-async fn chat_completions(Json(payload): Json<ChatCompletionsRequest>) -> Result<String, axum::http::StatusCode> {
+async fn chat_completions(
+    Json(payload): Json<ChatCompletionsRequest>,
+) -> Result<String, axum::http::StatusCode> {
+    let sdk_config = aws_config::defaults(BehaviorVersion::latest())
+        .region("us-east-1")
+        .load()
+        .await;
+
+    let client = Client::new(&sdk_config);
+
+    // Create a model_id variable as requested by the user.
+    let model_id = &payload.model;
+
     // Convert each OpenaiMessage to aws_sdk_bedrockruntime::types::Message
     let (system_content_blocks, messages) = process_messages(&payload.messages);
+
+    let response = client
+        .converse_stream()
+        .model_id(model_id)
+        .set_system(Some(system_content_blocks.clone()))
+        .set_messages(Some(messages.clone()))
+        .send()
+        .await;
 
     // Print results for debugging
     println!("System blocks: {:?}", system_content_blocks);
     println!("Messages: {:?}", messages);
+    println!("Response: {:?}", response);
 
     // TODO: Integrate with AWS Bedrock Runtime
 
@@ -294,7 +318,7 @@ mod tests {
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.temperature, Some(0.7));
     }
-    
+
     #[test]
     fn test_process_content_string() {
         let content = MessageContent::String("Test content".to_string());
@@ -340,14 +364,17 @@ mod tests {
 
         // Check converted messages
         assert_eq!(converted_messages.len(), 2);
-        assert!(matches!(converted_messages[0].role(), ConversationRole::User));
+        assert!(matches!(
+            converted_messages[0].role(),
+            ConversationRole::User
+        ));
         assert!(matches!(
             converted_messages[1].role(),
             ConversationRole::Assistant
         ));
     }
 
-     #[test]
+    #[test]
     fn test_deserialize_chat_request_with_array_content() {
         let chat_request_array = r#"{
             "model": "gpt-4",
