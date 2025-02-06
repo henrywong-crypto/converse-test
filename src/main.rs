@@ -375,8 +375,21 @@ async fn chat_completions(
                     );
                     yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
                 },
-                aws_sdk_bedrockruntime::types::ConverseStreamOutput::Metadata(_event) => {
-                    // We can ignore metadata events for now
+                aws_sdk_bedrockruntime::types::ConverseStreamOutput::Metadata(event) => {
+                    if let Some(usage) = event.usage {
+                        let chunk = create_chunk(
+                            &payload.model,
+                            ChatCompletionChunkChoiceDelta::Content {
+                                content: format!(
+                                    "{{\"usage\": {{\"input_tokens\": {}, \"output_tokens\": {}}}}}",
+                                    usage.input_tokens,
+                                    usage.output_tokens
+                                ),
+                            },
+                            None
+                        );
+                        yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
+                    }
                     continue;
                 },
                 _ => {
