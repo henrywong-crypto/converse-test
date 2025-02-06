@@ -211,7 +211,7 @@ where
         where
             E: de::Error,
         {
-            Ok(FromStr::from_str(value).unwrap())
+            Ok(FromStr::from_str(value).expect("FromStr implementation for void cannot fail"))
         }
 
         fn visit_seq<S>(self, seq: S) -> Result<T, S::Error>
@@ -297,7 +297,7 @@ fn create_chunk(
         object: "chat.completion.chunk".to_string(),
         created: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("SystemTime before Unix epoch")
             .as_secs(),
         model: model.to_string(),
         choices: vec![ChatCompletionChunkChoice {
@@ -351,7 +351,7 @@ async fn chat_completions(
                         ChatCompletionChunkChoiceDelta::Content { content },
                         None
                     );
-                    yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
+                    yield Ok(Event::default().data(serde_json::to_string(&chunk).map_err(|e| ChatCompletionError::StreamError(e.to_string()))?));
                 },
                 aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStart(_) |
                 aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStart(_) => {
@@ -362,7 +362,7 @@ async fn chat_completions(
                         },
                         None
                     );
-                    yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
+                    yield Ok(Event::default().data(serde_json::to_string(&chunk).map_err(|e| ChatCompletionError::StreamError(e.to_string()))?));
                 },
                 aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStop(_) |
                 aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStop(_) => {
@@ -373,7 +373,7 @@ async fn chat_completions(
                         },
                         Some("stop".to_string())
                     );
-                    yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
+                    yield Ok(Event::default().data(serde_json::to_string(&chunk).map_err(|e| ChatCompletionError::StreamError(e.to_string()))?));
                 },
                 aws_sdk_bedrockruntime::types::ConverseStreamOutput::Metadata(event) => {
                     if let Some(usage) = event.usage {
@@ -388,7 +388,7 @@ async fn chat_completions(
                             },
                             None
                         );
-                        yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
+                        yield Ok(Event::default().data(serde_json::to_string(&chunk).map_err(|e| ChatCompletionError::StreamError(e.to_string()))?));
                     }
                     continue;
                 },
