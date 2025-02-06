@@ -19,7 +19,9 @@ use axum::{
     response::sse::{Event, Sse},
     routing::post,
 };
+use either::Either;
 use futures::stream::Stream;
+use itertools::Itertools;
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
@@ -271,34 +273,32 @@ fn process_system_content(content: &MessageContent) -> Vec<SystemContentBlock> {
 }
 
 fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec<Message>) {
-    let mut system_blocks = Vec::new();
-    let mut non_system_messages = Vec::new();
-
-    for msg in messages {
-        match msg.role {
-            Role::System => {
-                system_blocks.extend(process_system_content(&msg.content));
-            }
+    let (system_blocks, non_system_messages): (Vec<_>, Vec<_>) = messages
+        .iter()
+        .map(|msg| match msg.role {
+            Role::System => Either::Left(process_system_content(&msg.content)),
             Role::Assistant | Role::User => {
                 let content_blocks = process_content(&msg.content);
                 let role = match msg.role {
                     Role::Assistant => ConversationRole::Assistant,
                     Role::User => ConversationRole::User,
-                    _ => unreachable!(), // We've already handled System above
+                    _ => unreachable!(),
                 };
-
-                if let Ok(message) = Message::builder()
-                    .role(role)
-                    .set_content(Some(content_blocks))
-                    .build()
-                {
-                    non_system_messages.push(message);
-                }
+                Either::Right(
+                    Message::builder()
+                        .role(role)
+                        .set_content(Some(content_blocks))
+                        .build()
+                        .ok(),
+                )
             }
-        }
-    }
+        })
+        .partition_map(|x| x);
 
-    (system_blocks, non_system_messages)
+    (
+        system_blocks.into_iter().flatten().collect(),
+        non_system_messages.into_iter().filter_map(|x| x).collect(),
+    )
 }
 
 /// Creates a Bedrock client with default configuration
