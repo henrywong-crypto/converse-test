@@ -54,6 +54,71 @@ impl IntoResponse for ChatCompletionError {
 
         (status, body).into_response()
     }
+
+    #[tokio::test]
+    async fn test_chat_completions_success() {
+        // This test would require mocking the Bedrock client, which is not possible here.
+        // This is a placeholder to show how the test would be structured.
+
+        /*
+        let request = ChatCompletionsRequest {
+            model: "amazon.titan-text-express-v1".to_string(),
+            messages: vec![OpenaiMessage {
+                role: Role::User,
+                content: MessageContent::String("Hello".to_string()),
+            }],
+            stream: Some(true),
+            ..Default::default() // Add Default trait to ChatCompletionsRequest for easier testing
+        };
+
+        let result = chat_completions(Json(request)).await;
+        assert!(result.is_ok());
+
+        // Further assertions would be needed to check the content of the SSE stream,
+        // which would require awaiting and collecting the events.
+        */
+    }
+
+    #[tokio::test]
+    async fn test_chat_completions_invalid_model() {
+        // This test would also require mocking the Bedrock client.
+        // This is a placeholder.
+
+        /*
+        let request = ChatCompletionsRequest {
+            model: "invalid-model-id".to_string(),
+            messages: vec![OpenaiMessage {
+                role: Role::User,
+                content: MessageContent::String("Hello".to_string()),
+            }],
+            stream: Some(true),
+             ..Default::default()
+        };
+
+        let result = chat_completions(Json(request)).await;
+        assert!(matches!(result, Err(ChatCompletionError::BedrockApi(_))));
+        */
+    }
+}
+
+// Add Default trait to ChatCompletionsRequest
+impl Default for ChatCompletionsRequest {
+    fn default() -> Self {
+        ChatCompletionsRequest {
+            model: "".to_string(),
+            messages: vec![],
+            temperature: None,
+            top_p: None,
+            n: None,
+            stream: None,
+            stop: None,
+            max_tokens: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            logit_bias: None,
+            user: None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -251,9 +316,8 @@ fn process_content(content: &MessageContent) -> Vec<ContentBlock> {
         MessageContent::String(text) => vec![ContentBlock::Text(text.clone())],
         MessageContent::Array(contents) => contents
             .iter()
-            .map(|c| {
-                let Content::Text { text } = c;
-                ContentBlock::Text(text.clone())
+            .map(|c| match c {
+                Content::Text { text } => ContentBlock::Text(text.clone()),
             })
             .collect(),
     }
@@ -264,70 +328,42 @@ fn process_system_content(content: &MessageContent) -> Vec<SystemContentBlock> {
         MessageContent::String(text) => vec![SystemContentBlock::Text(text.clone())],
         MessageContent::Array(contents) => contents
             .iter()
-            .map(|c| {
-                let Content::Text { text } = c;
-                SystemContentBlock::Text(text.clone())
+            .map(|c| match c {
+                Content::Text { text } => SystemContentBlock::Text(text.clone()),
             })
             .collect(),
     }
 }
 
 fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec<Message>) {
-    let (system_messages, non_system_messages): (Vec<_>, Vec<_>) = messages
-        .iter()
-        .partition(|msg| matches!(msg.role, Role::System));
+    let mut system_blocks = Vec::new();
+    let mut non_system_messages = Vec::new();
 
-    let system_blocks = system_messages
-        .iter()
-        .flat_map(|msg| process_system_content(&msg.content))
-        .collect();
+    for msg in messages {
+        match msg.role {
+            Role::System => {
+                system_blocks.extend(process_system_content(&msg.content));
+            }
+            Role::Assistant | Role::User => {
+                let content_blocks = process_content(&msg.content);
+                let role = match msg.role {
+                    Role::Assistant => ConversationRole::Assistant,
+                    Role::User => ConversationRole::User,
+                    _ => unreachable!(), // We've already handled System above
+                };
 
-    let non_system_messages = non_system_messages
-        .iter()
-        .filter_map(|msg| {
-            let content_blocks = process_content(&msg.content);
-
-            let role = match msg.role {
-                Role::System => {
-                    tracing::warn!("System role encountered in non-system messages");
-                    None
+                if let Ok(message) = Message::builder()
+                    .role(role)
+                    .set_content(Some(content_blocks))
+                    .build()
+                {
+                    non_system_messages.push(message);
                 }
-                Role::Assistant => Some(ConversationRole::Assistant),
-                Role::User => Some(ConversationRole::User),
-            }?;
-
-            Message::builder()
-                .role(role)
-                .set_content(Some(content_blocks))
-                .build()
-                .ok()
-        })
-        .collect();
+            }
+        }
+    }
 
     (system_blocks, non_system_messages)
-}
-
-/// Helper function to create a chat completion chunk with standardized structure
-fn create_chunk(
-    model: &str,
-    role_or_content: ChatCompletionChunkChoiceDelta,
-    finish_reason: Option<String>,
-) -> ChatCompletionChunk {
-    ChatCompletionChunk {
-        id: Uuid::new_v4().to_string(),
-        object: CHAT_COMPLETION_OBJECT.to_string(),
-        created: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("SystemTime before Unix epoch")
-            .as_secs(),
-        model: model.to_string(),
-        choices: vec![ChatCompletionChunkChoice {
-            delta: role_or_content,
-            index: 0,
-            finish_reason,
-        }],
-        usage: None,
-    }
 }
 
 /// Creates a Bedrock client with default configuration
@@ -339,71 +375,152 @@ async fn create_bedrock_client() -> Client {
     Client::new(&sdk_config)
 }
 
-/// Handles content block delta events by creating appropriate chunks
-fn handle_content_block_delta(
+/// Handles different stream events and creates appropriate chunks
+fn handle_stream_event(
     model: &str,
-    event: aws_sdk_bedrockruntime::types::ContentBlockDeltaEvent,
+    event: aws_sdk_bedrockruntime::types::ConverseStreamOutput,
 ) -> Result<Event, ChatCompletionError> {
-    let content = match event.delta {
-        Some(aws_sdk_bedrockruntime::types::ContentBlockDelta::Text(text)) => text,
-        _ => String::new(),
-    };
+    match event {
+        aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockDelta(event) => {
+            let content = match event.delta {
+                Some(aws_sdk_bedrockruntime::types::ContentBlockDelta::Text(text)) => text,
+                _ => String::new(),
+            };
 
-    let chunk = create_chunk(
-        model,
-        ChatCompletionChunkChoiceDelta::Content { content },
-        None,
-    );
+            let chunk = ChatCompletionChunk {
+                id: Uuid::new_v4().to_string(),
+                object: CHAT_COMPLETION_OBJECT.to_string(),
+                created: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("SystemTime before Unix epoch")
+                    .as_secs(),
+                model: model.to_string(),
+                choices: vec![ChatCompletionChunkChoice {
+                    delta: ChatCompletionChunkChoiceDelta::Content { content },
+                    index: 0,
+                    finish_reason: None,
+                }],
+                usage: None,
+            };
 
-    create_sse_event(&chunk)
-}
+            create_sse_event(&chunk)
+        }
+        aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStart(_)
+        | aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStart(_) => {
+            let chunk = ChatCompletionChunk {
+                id: Uuid::new_v4().to_string(),
+                object: CHAT_COMPLETION_OBJECT.to_string(),
+                created: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("SystemTime before Unix epoch")
+                    .as_secs(),
+                model: model.to_string(),
+                choices: vec![ChatCompletionChunkChoice {
+                    delta: ChatCompletionChunkChoiceDelta::Role {
+                        role: ASSISTANT_ROLE.to_string(),
+                    },
+                    index: 0,
+                    finish_reason: None,
+                }],
+                usage: None,
+            };
 
-/// Handles message start events by creating role chunks
-fn handle_message_start(model: &str) -> Result<Event, ChatCompletionError> {
-    let chunk = create_chunk(
-        model,
-        ChatCompletionChunkChoiceDelta::Role {
-            role: ASSISTANT_ROLE.to_string(),
-        },
-        None,
-    );
+            create_sse_event(&chunk)
+        }
+        aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStop(_)
+        | aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStop(_) => {
+            let chunk = ChatCompletionChunk {
+                id: Uuid::new_v4().to_string(),
+                object: CHAT_COMPLETION_OBJECT.to_string(),
+                created: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("SystemTime before Unix epoch")
+                    .as_secs(),
+                model: model.to_string(),
+                choices: vec![ChatCompletionChunkChoice {
+                    delta: ChatCompletionChunkChoiceDelta::Content {
+                        content: String::new(),
+                    },
+                    index: 0,
+                    finish_reason: Some(STOP_REASON.to_string()),
+                }],
+                usage: None,
+            };
 
-    create_sse_event(&chunk)
-}
-
-/// Handles message stop events by creating final chunks
-fn handle_message_stop(model: &str) -> Result<Event, ChatCompletionError> {
-    let chunk = create_chunk(
-        model,
-        ChatCompletionChunkChoiceDelta::Content {
-            content: String::new(),
-        },
-        Some(STOP_REASON.to_string()),
-    );
-
-    create_sse_event(&chunk)
-}
-
-/// Handles metadata events by creating usage information chunks
-fn handle_metadata(
-    model: &str,
-    usage: aws_sdk_bedrockruntime::types::TokenUsage,
-) -> Result<Event, ChatCompletionError> {
-    let mut chunk = create_chunk(
-        model,
-        ChatCompletionChunkChoiceDelta::Content {
-            content: String::new(),
-        },
-        None,
-    );
-    chunk.usage = Some(Usage {
-        prompt_tokens: usage.input_tokens,
-        completion_tokens: usage.output_tokens,
-        total_tokens: usage.total_tokens,
-        completion_tokens_details: None,
-        prompt_tokens_details: None,
-    });
-    create_sse_event(&chunk)
+            create_sse_event(&chunk)
+        }
+        aws_sdk_bedrockruntime::types::ConverseStreamOutput::Metadata(event) => {
+            if let Some(usage) = event.usage {
+                let mut chunk = ChatCompletionChunk {
+                    id: Uuid::new_v4().to_string(),
+                    object: CHAT_COMPLETION_OBJECT.to_string(),
+                    created: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("SystemTime before Unix epoch")
+                        .as_secs(),
+                    model: model.to_string(),
+                    choices: vec![ChatCompletionChunkChoice {
+                        delta: ChatCompletionChunkChoiceDelta::Content {
+                            content: String::new(),
+                        },
+                        index: 0,
+                        finish_reason: None,
+                    }],
+                    usage: None,
+                };
+                chunk.usage = Some(Usage {
+                    prompt_tokens: usage.input_tokens,
+                    completion_tokens: usage.output_tokens,
+                    total_tokens: usage.total_tokens,
+                    completion_tokens_details: None,
+                    prompt_tokens_details: None,
+                });
+                create_sse_event(&chunk)
+            } else {
+                let chunk = ChatCompletionChunk {
+                    id: Uuid::new_v4().to_string(),
+                    object: CHAT_COMPLETION_OBJECT.to_string(),
+                    created: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("SystemTime before Unix epoch")
+                        .as_secs(),
+                    model: model.to_string(),
+                    choices: vec![ChatCompletionChunkChoice {
+                        delta: ChatCompletionChunkChoiceDelta::Content {
+                            content: String::new(),
+                        },
+                        index: 0,
+                        finish_reason: None,
+                    }],
+                    usage: None,
+                };
+                // Return a no-op event if there's no usage data
+                create_sse_event(&chunk)
+            }
+        }
+        _ => {
+            tracing::warn!("Unknown stream chunk type");
+            let chunk = ChatCompletionChunk {
+                id: Uuid::new_v4().to_string(),
+                object: CHAT_COMPLETION_OBJECT.to_string(),
+                created: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("SystemTime before Unix epoch")
+                    .as_secs(),
+                model: model.to_string(),
+                choices: vec![ChatCompletionChunkChoice {
+                    delta: ChatCompletionChunkChoiceDelta::Content {
+                        content: String::new(),
+                    },
+                    index: 0,
+                    finish_reason: None,
+                }],
+                usage: None,
+            };
+            // Return a no-op event for unknown types
+            create_sse_event(&chunk)
+        }
+    }
 }
 
 /// Creates an SSE event from a chunk
@@ -421,42 +538,19 @@ async fn chat_completions(
     let client = create_bedrock_client().await;
     let (system_content_blocks, messages) = process_messages(&payload.messages);
 
-    let response_stream = client
+    let mut stream = client
         .converse_stream()
         .model_id(&payload.model)
         .set_system(Some(system_content_blocks))
         .set_messages(Some(messages))
         .send()
-        .await;
-
-    let mut stream = match response_stream {
-        Ok(output) => output.stream,
-        Err(e) => return Err(ChatCompletionError::BedrockApi(e.to_string())),
-    };
+        .await
+        .map_err(|e| ChatCompletionError::BedrockApi(e.to_string()))?
+        .stream;
 
     let sse_stream = async_stream::stream! {
-        while let Some(part) = stream.recv().await.map_err(|e| ChatCompletionError::StreamError(e.to_string()))? {
-            match part {
-                aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockDelta(event) => {
-                    yield handle_content_block_delta(&payload.model, event);
-                },
-                aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStart(_) |
-                aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStart(_) => {
-                    yield handle_message_start(&payload.model);
-                },
-                aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStop(_) |
-                aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStop(_) => {
-                    yield handle_message_stop(&payload.model);
-                },
-                aws_sdk_bedrockruntime::types::ConverseStreamOutput::Metadata(event) => {
-                    if let Some(usage) = event.usage {
-                        yield handle_metadata(&payload.model, usage);
-                    }
-                },
-                _ => {
-                    tracing::warn!("Unknown stream chunk type");
-                }
-            }
+        while let Some(event) = stream.recv().await.map_err(|e| ChatCompletionError::StreamError(e.to_string()))? {
+            yield handle_stream_event(&payload.model, event);
         }
         yield Ok(Event::default().data(SSE_DONE_MESSAGE));
     };
