@@ -3,14 +3,69 @@ use aws_sdk_bedrockruntime::{
     Client,
     types::{ContentBlock, ConversationRole, Message, SystemContentBlock},
 };
-use axum::{Json, Router, routing::post};
+use axum::response::IntoResponse;
+use axum::{
+    Json, Router,
+    response::sse::{Event, Sse},
+    routing::post,
+};
+use futures::stream::{self, Stream};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use tokio_stream::StreamExt as _;
+use uuid;
+use uuid::Uuid;
 use void::Void;
+
+#[derive(Debug, Serialize, thiserror::Error)]
+pub enum ChatCompletionError {
+    #[error("Bedrock API error: {0}")]
+    BedrockApi(String),
+
+    #[error("Error receiving stream: {0}")]
+    StreamError(String),
+
+    #[error("Utterance not found in stream chunk")]
+    UtteranceNotFound,
+
+    #[error("Internal Server Error")]
+    InternalServerError,
+}
+
+impl IntoResponse for ChatCompletionError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, error_message) = match self {
+            ChatCompletionError::BedrockApi(msg) => (axum::http::StatusCode::BAD_REQUEST, msg),
+            ChatCompletionError::StreamError(msg) => {
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg)
+            }
+            ChatCompletionError::UtteranceNotFound => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Utterance not found".to_string(),
+            ),
+            ChatCompletionError::InternalServerError => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error".to_string(),
+            ),
+        };
+
+        let body = axum::Json(ErrorResponse {
+            error: error_message,
+        });
+
+        (status, body).into_response()
+    }
+}
+
+#[derive(Serialize)]
+pub struct ErrorResponse {
+    error: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -32,6 +87,29 @@ pub struct OpenaiMessage {
     pub role: Role,
     #[serde(deserialize_with = "string_or_array")]
     pub content: MessageContent,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ChatCompletionChunk {
+    id: String,
+    object: String,
+    created: u64,
+    model: String,
+    choices: Vec<ChatCompletionChunkChoice>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ChatCompletionChunkChoice {
+    delta: ChatCompletionChunkChoiceDelta,
+    index: i32,
+    finish_reason: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(untagged)]
+pub enum ChatCompletionChunkChoiceDelta {
+    Role { role: String },
+    Content { content: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,7 +311,10 @@ fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec
 
 async fn chat_completions(
     Json(payload): Json<ChatCompletionsRequest>,
-) -> Result<String, axum::http::StatusCode> {
+) -> Result<
+    Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>, // Changed Infallible to ChatCompletionError
+    ChatCompletionError,
+> {
     let sdk_config = aws_config::defaults(BehaviorVersion::latest())
         .region("us-east-1")
         .load()
@@ -247,22 +328,54 @@ async fn chat_completions(
     // Convert each OpenaiMessage to aws_sdk_bedrockruntime::types::Message
     let (system_content_blocks, messages) = process_messages(&payload.messages);
 
-    let response = client
+    let response_stream = client
         .converse_stream()
         .model_id(model_id)
-        .set_system(Some(system_content_blocks.clone()))
-        .set_messages(Some(messages.clone()))
+        .set_system(Some(system_content_blocks))
+        .set_messages(Some(messages))
         .send()
         .await;
 
-    // Print results for debugging
-    println!("System blocks: {:?}", system_content_blocks);
-    println!("Messages: {:?}", messages);
-    println!("Response: {:?}", response);
+    let mut stream = match response_stream {
+        Ok(output) => output.stream,
+        Err(e) => return Err(ChatCompletionError::BedrockApi(e.to_string())),
+    };
 
-    // TODO: Integrate with AWS Bedrock Runtime
+    let sse_stream = async_stream::stream! {
+        while let Some(part) = stream.recv().await.map_err(|e| ChatCompletionError::StreamError(e.to_string()))? { // Added map_err
+            match part {
+                aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockDelta(event) => {
+                    todo!()
+                },
+                aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStart(event) => {
+                    todo!()
+                },
+                aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStop(event) => {
+                    todo!()
+                },
+                aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStart(event) => {
+                    todo!()
+                },
+                aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStop(event) => {
+                    todo!()
+                },
+                aws_sdk_bedrockruntime::types::ConverseStreamOutput::Metadata(event) => {
+                    todo!()
+                },
+                // aws_sdk_bedrockruntime::types::ConverseStreamOutput::Unknown => {
+                //     tracing::error!("Unknown stream chunk");
+                //     let error_response = ErrorResponse { error: "Unknown stream chunk".to_string() };
+                //     yield Ok(Event::default().data(serde_json::to_string(&error_response).unwrap()));
+                // }
+                _ => {
+                    todo!()
+                }
+            }
+        }
+        yield Ok(Event::default().data("[DONE]"));
+    };
 
-    Ok("Hello world".to_string())
+    Ok(Sse::new(sse_stream))
 }
 
 #[cfg(test)]
