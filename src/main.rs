@@ -54,51 +54,6 @@ impl IntoResponse for ChatCompletionError {
 
         (status, body).into_response()
     }
-
-    #[tokio::test]
-    async fn test_chat_completions_success() {
-        // This test would require mocking the Bedrock client, which is not possible here.
-        // This is a placeholder to show how the test would be structured.
-
-        /*
-        let request = ChatCompletionsRequest {
-            model: "amazon.titan-text-express-v1".to_string(),
-            messages: vec![OpenaiMessage {
-                role: Role::User,
-                content: MessageContent::String("Hello".to_string()),
-            }],
-            stream: Some(true),
-            ..Default::default() // Add Default trait to ChatCompletionsRequest for easier testing
-        };
-
-        let result = chat_completions(Json(request)).await;
-        assert!(result.is_ok());
-
-        // Further assertions would be needed to check the content of the SSE stream,
-        // which would require awaiting and collecting the events.
-        */
-    }
-
-    #[tokio::test]
-    async fn test_chat_completions_invalid_model() {
-        // This test would also require mocking the Bedrock client.
-        // This is a placeholder.
-
-        /*
-        let request = ChatCompletionsRequest {
-            model: "invalid-model-id".to_string(),
-            messages: vec![OpenaiMessage {
-                role: Role::User,
-                content: MessageContent::String("Hello".to_string()),
-            }],
-            stream: Some(true),
-             ..Default::default()
-        };
-
-        let result = chat_completions(Json(request)).await;
-        assert!(matches!(result, Err(ChatCompletionError::BedrockApi(_))));
-        */
-    }
 }
 
 // Add Default trait to ChatCompletionsRequest
