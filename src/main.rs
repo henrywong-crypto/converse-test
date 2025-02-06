@@ -102,8 +102,17 @@ pub struct ChatCompletionChunkChoice {
 #[derive(Serialize, Debug)]
 #[serde(untagged)]
 pub enum ChatCompletionChunkChoiceDelta {
-    Role { role: String },
-    Content { content: String },
+    Role {
+        role: String,
+    },
+    Content {
+        content: String,
+    },
+    Usage {
+        prompt_tokens: i32,
+        completion_tokens: i32,
+        total_tokens: i32,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -380,11 +389,10 @@ fn handle_metadata(
 ) -> Result<Event, ChatCompletionError> {
     let chunk = create_chunk(
         model,
-        ChatCompletionChunkChoiceDelta::Content {
-            content: format!(
-                "\"usage\": {{\"prompt_tokens\": {}, \"completion_tokens\": {}, \"total_tokens\": {}}}",
-                usage.input_tokens, usage.output_tokens, usage.total_tokens
-            ),
+        ChatCompletionChunkChoiceDelta::Usage {
+            prompt_tokens: usage.input_tokens,
+            completion_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
         },
         None,
     );
