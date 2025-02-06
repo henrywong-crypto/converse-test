@@ -26,12 +26,6 @@ pub enum ChatCompletionError {
 
     #[error("Error receiving stream: {0}")]
     StreamError(String),
-
-    #[error("Utterance not found in stream chunk")]
-    UtteranceNotFound,
-
-    #[error("Internal Server Error")]
-    InternalServerError,
 }
 
 impl IntoResponse for ChatCompletionError {
@@ -41,14 +35,6 @@ impl IntoResponse for ChatCompletionError {
             ChatCompletionError::StreamError(msg) => {
                 (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg)
             }
-            ChatCompletionError::UtteranceNotFound => (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "Utterance not found".to_string(),
-            ),
-            ChatCompletionError::InternalServerError => (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal Server Error".to_string(),
-            ),
         };
 
         let body = axum::Json(ErrorResponse {
