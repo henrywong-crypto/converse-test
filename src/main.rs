@@ -56,26 +56,6 @@ impl IntoResponse for ChatCompletionError {
     }
 }
 
-// Add Default trait to ChatCompletionsRequest
-impl Default for ChatCompletionsRequest {
-    fn default() -> Self {
-        ChatCompletionsRequest {
-            model: "".to_string(),
-            messages: vec![],
-            temperature: None,
-            top_p: None,
-            n: None,
-            stream: None,
-            stop: None,
-            max_tokens: None,
-            presence_penalty: None,
-            frequency_penalty: None,
-            logit_bias: None,
-            user: None,
-        }
-    }
-}
-
 #[derive(Serialize)]
 pub struct ErrorResponse {
     error: String,
