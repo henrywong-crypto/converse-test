@@ -382,7 +382,7 @@ fn handle_metadata(
         model,
         ChatCompletionChunkChoiceDelta::Content {
             content: format!(
-                "{{\"usage\": {{\"prompt_tokens\": {}, \"completion_tokens\": {}, \"total_tokens\": {}}}}}",
+                "\"usage\": {{\"prompt_tokens\": {}, \"completion_tokens\": {}, \"total_tokens\": {}}}",
                 usage.input_tokens, usage.output_tokens, usage.total_tokens
             ),
         },
