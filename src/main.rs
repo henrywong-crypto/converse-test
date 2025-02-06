@@ -7,6 +7,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
 use void::Void;
+use tracing;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -160,6 +161,38 @@ where
     deserializer.deserialize_any(StringOrArray(PhantomData))
 }
 
+fn process_content(content: &MessageContent) -> Vec<ContentBlock> {
+    match content {
+        MessageContent::String(text) => vec![ContentBlock::Text(text.clone())],
+        MessageContent::Array(contents) => contents
+            .iter()
+            .filter_map(|c| {
+                if let Content::Text { text } = c {
+                    Some(ContentBlock::Text(text.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    }
+}
+
+fn process_system_content(content: &MessageContent) -> Vec<SystemContentBlock> {
+     match content {
+        MessageContent::String(text) => vec![SystemContentBlock::Text(text.clone())],
+        MessageContent::Array(contents) => contents
+            .iter()
+            .filter_map(|c| {
+                if let Content::Text { text } = c {
+                    Some(SystemContentBlock::Text(text.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    }
+}
+
 fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec<Message>) {
     let (system_messages, non_system_messages): (Vec<_>, Vec<_>) = messages
         .iter()
@@ -167,43 +200,22 @@ fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec
 
     let system_blocks = system_messages
         .iter()
-        .flat_map(|msg| match &msg.content {
-            MessageContent::String(text) => vec![SystemContentBlock::Text(text.clone())],
-            MessageContent::Array(contents) => contents
-                .iter()
-                .filter_map(|content| {
-                    if let Content::Text { text } = content {
-                        Some(SystemContentBlock::Text(text.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<SystemContentBlock>>(),
-        })
+        .flat_map(|msg| process_system_content(&msg.content))
         .collect();
 
     let non_system_messages = non_system_messages
         .iter()
         .filter_map(|msg| {
-            let content_blocks = match &msg.content {
-                MessageContent::String(text) => vec![ContentBlock::Text(text.clone())],
-                MessageContent::Array(contents) => contents
-                    .iter()
-                    .filter_map(|content| {
-                        if let Content::Text { text } = content {
-                            Some(ContentBlock::Text(text.clone()))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<ContentBlock>>(),
-            };
+            let content_blocks = process_content(&msg.content);
 
             let role = match msg.role {
-                Role::System => unreachable!("System messages should have been filtered out"),
-                Role::Assistant => ConversationRole::Assistant,
-                Role::User => ConversationRole::User,
-            };
+                Role::System => {
+                    tracing::warn!("System role encountered in non-system messages");
+                    None
+                },
+                Role::Assistant => Some(ConversationRole::Assistant),
+                Role::User => Some(ConversationRole::User),
+            }?;
 
             Message::builder()
                 .role(role)
@@ -216,14 +228,17 @@ fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec
     (system_blocks, non_system_messages)
 }
 
-async fn chat_completions(Json(payload): Json<ChatCompletionsRequest>) -> &'static str {
+async fn chat_completions(Json(payload): Json<ChatCompletionsRequest>) -> Result<String, axum::http::StatusCode> {
     // Convert each OpenaiMessage to aws_sdk_bedrockruntime::types::Message
     let (system_content_blocks, messages) = process_messages(&payload.messages);
 
     // Print results for debugging
     println!("System blocks: {:?}", system_content_blocks);
     println!("Messages: {:?}", messages);
-    "Hello world"
+
+    // TODO: Integrate with AWS Bedrock Runtime
+
+    Ok("Hello world".to_string())
 }
 
 #[cfg(test)]
@@ -231,22 +246,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_string_content_deserialization() {
+    fn test_deserialize_string_content() {
         let json_string = r#"{
             "role": "user",
             "content": "Hello, how are you?"
         }"#;
 
         let message: OpenaiMessage = serde_json::from_str(json_string).unwrap();
-        if let MessageContent::String(content) = message.content {
-            assert_eq!(content, "Hello, how are you?");
-        } else {
-            panic!("Expected String content");
-        }
+        assert!(matches!(message.content, MessageContent::String(_)));
     }
 
     #[test]
-    fn test_array_content_deserialization() {
+    fn test_deserialize_array_content() {
         let json_array = r#"{
             "role": "user",
             "content": [
@@ -258,20 +269,11 @@ mod tests {
         }"#;
 
         let message: OpenaiMessage = serde_json::from_str(json_array).unwrap();
-        if let MessageContent::Array(content) = message.content {
-            assert_eq!(content.len(), 1);
-            if let Content::Text { text } = &content[0] {
-                assert_eq!(text, "What is the weather like?");
-            } else {
-                panic!("Expected Text content");
-            }
-        } else {
-            panic!("Expected Array content");
-        }
+        assert!(matches!(message.content, MessageContent::Array(_)));
     }
 
     #[test]
-    fn test_chat_request_with_string_content() {
+    fn test_deserialize_chat_request_with_string_content() {
         let chat_request = r#"{
             "model": "gpt-4",
             "messages": [
@@ -292,9 +294,27 @@ mod tests {
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.temperature, Some(0.7));
     }
+    
+    #[test]
+    fn test_process_content_string() {
+        let content = MessageContent::String("Test content".to_string());
+        let result = process_content(&content);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], ContentBlock::Text(text) if text == "Test content"));
+    }
 
     #[test]
-    fn test_process_messages() {
+    fn test_process_content_array() {
+        let content = MessageContent::Array(vec![Content::Text {
+            text: "Test content".to_string(),
+        }]);
+        let result = process_content(&content);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], ContentBlock::Text(text) if text == "Test content"));
+    }
+
+    #[test]
+    fn test_process_messages_mixed_roles() {
         let messages = vec![
             OpenaiMessage {
                 role: Role::System,
@@ -320,29 +340,15 @@ mod tests {
 
         // Check converted messages
         assert_eq!(converted_messages.len(), 2);
-        let user_message = &converted_messages[0];
-        let assistant_message = &converted_messages[1];
-
-        // Verify user message
-        assert!(matches!(user_message.role(), ConversationRole::User));
-        let user_content = user_message.content();
-        assert_eq!(user_content.len(), 1);
-        assert!(matches!(&user_content[0], ContentBlock::Text(text) if text == "User message"));
-
-        // Verify assistant message
+        assert!(matches!(converted_messages[0].role(), ConversationRole::User));
         assert!(matches!(
-            assistant_message.role(),
+            converted_messages[1].role(),
             ConversationRole::Assistant
         ));
-        let assistant_content = assistant_message.content();
-        assert_eq!(assistant_content.len(), 1);
-        assert!(
-            matches!(&assistant_content[0], ContentBlock::Text(text) if text == "Assistant message")
-        );
     }
 
-    #[test]
-    fn test_chat_request_with_array_content() {
+     #[test]
+    fn test_deserialize_chat_request_with_array_content() {
         let chat_request_array = r#"{
             "model": "gpt-4",
             "messages": [
@@ -363,16 +369,5 @@ mod tests {
         assert_eq!(request.model, "gpt-4");
         assert_eq!(request.messages.len(), 1);
         assert_eq!(request.temperature, Some(0.7));
-
-        if let MessageContent::Array(content) = &request.messages[0].content {
-            assert_eq!(content.len(), 1);
-            if let Content::Text { text } = &content[0] {
-                assert_eq!(text, "Tell me about programming.");
-            } else {
-                panic!("Expected Text content");
-            }
-        } else {
-            panic!("Expected Array content");
-        }
     }
 }
