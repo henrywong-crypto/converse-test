@@ -9,16 +9,13 @@ use axum::{
     response::sse::{Event, Sse},
     routing::post,
 };
-use futures::stream::{self, Stream};
-use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use futures::stream::Stream;
+use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
-use tokio_stream::StreamExt as _;
-use uuid;
 use uuid::Uuid;
 use void::Void;
 
@@ -247,12 +244,9 @@ fn process_content(content: &MessageContent) -> Vec<ContentBlock> {
         MessageContent::String(text) => vec![ContentBlock::Text(text.clone())],
         MessageContent::Array(contents) => contents
             .iter()
-            .filter_map(|c| {
-                if let Content::Text { text } = c {
-                    Some(ContentBlock::Text(text.clone()))
-                } else {
-                    None
-                }
+            .map(|c| {
+                let Content::Text { text } = c;
+                ContentBlock::Text(text.clone())
             })
             .collect(),
     }
@@ -263,12 +257,9 @@ fn process_system_content(content: &MessageContent) -> Vec<SystemContentBlock> {
         MessageContent::String(text) => vec![SystemContentBlock::Text(text.clone())],
         MessageContent::Array(contents) => contents
             .iter()
-            .filter_map(|c| {
-                if let Content::Text { text } = c {
-                    Some(SystemContentBlock::Text(text.clone()))
-                } else {
-                    None
-                }
+            .map(|c| {
+                let Content::Text { text } = c;
+                SystemContentBlock::Text(text.clone())
             })
             .collect(),
     }
@@ -310,7 +301,11 @@ fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec
 }
 
 // Helper function to create a chat completion chunk
-fn create_chunk(model: &str, role_or_content: ChatCompletionChunkChoiceDelta, finish_reason: Option<String>) -> ChatCompletionChunk {
+fn create_chunk(
+    model: &str,
+    role_or_content: ChatCompletionChunkChoiceDelta,
+    finish_reason: Option<String>,
+) -> ChatCompletionChunk {
     ChatCompletionChunk {
         id: Uuid::new_v4().to_string(),
         object: "chat.completion.chunk".to_string(),
@@ -330,10 +325,7 @@ fn create_chunk(model: &str, role_or_content: ChatCompletionChunkChoiceDelta, fi
 // Main chat completions handler
 async fn chat_completions(
     Json(payload): Json<ChatCompletionsRequest>,
-) -> Result<
-    Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>,
-    ChatCompletionError,
-> {
+) -> Result<Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>, ChatCompletionError> {
     let sdk_config = aws_config::defaults(BehaviorVersion::latest())
         .region("us-east-1")
         .load()
