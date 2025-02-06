@@ -309,10 +309,29 @@ fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec
     (system_blocks, non_system_messages)
 }
 
+// Helper function to create a chat completion chunk
+fn create_chunk(model: &str, role_or_content: ChatCompletionChunkChoiceDelta, finish_reason: Option<String>) -> ChatCompletionChunk {
+    ChatCompletionChunk {
+        id: Uuid::new_v4().to_string(),
+        object: "chat.completion.chunk".to_string(),
+        created: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        model: model.to_string(),
+        choices: vec![ChatCompletionChunkChoice {
+            delta: role_or_content,
+            index: 0,
+            finish_reason,
+        }],
+    }
+}
+
+// Main chat completions handler
 async fn chat_completions(
     Json(payload): Json<ChatCompletionsRequest>,
 ) -> Result<
-    Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>, // Changed Infallible to ChatCompletionError
+    Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>,
     ChatCompletionError,
 > {
     let sdk_config = aws_config::defaults(BehaviorVersion::latest())
@@ -342,115 +361,46 @@ async fn chat_completions(
     };
 
     let sse_stream = async_stream::stream! {
-        while let Some(part) = stream.recv().await.map_err(|e| ChatCompletionError::StreamError(e.to_string()))? { // Added map_err
+        while let Some(part) = stream.recv().await.map_err(|e| ChatCompletionError::StreamError(e.to_string()))? {
             match part {
                 aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockDelta(event) => {
-                    let chunk = ChatCompletionChunk {
-                        id: Uuid::new_v4().to_string(),
-                        object: "chat.completion.chunk".to_string(),
-                        created: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs(),
-                        model: payload.model.clone(),
-                        choices: vec![ChatCompletionChunkChoice {
-                            delta: ChatCompletionChunkChoiceDelta::Content {
-                                content: match event.delta {
-                      Some(aws_sdk_bedrockruntime::types::ContentBlockDelta::Text(text)) => text,
-                      _ => String::new(),
-                  },
-                            },
-                            index: 0,
-                            finish_reason: None,
-                        }],
+                    let content = match event.delta {
+                        Some(aws_sdk_bedrockruntime::types::ContentBlockDelta::Text(text)) => text,
+                        _ => String::new(),
                     };
+                    let chunk = create_chunk(
+                        &payload.model,
+                        ChatCompletionChunkChoiceDelta::Content { content },
+                        None
+                    );
                     yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
                 },
-                aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStart(event) => {
-                    let chunk = ChatCompletionChunk {
-                        id: Uuid::new_v4().to_string(),
-                        object: "chat.completion.chunk".to_string(),
-                        created: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs(),
-                        model: payload.model.clone(),
-                        choices: vec![ChatCompletionChunkChoice {
-                            delta: ChatCompletionChunkChoiceDelta::Role {
-                                role: "assistant".to_string(),
-                            },
-                            index: 0,
-                            finish_reason: None,
-                        }],
-                    };
+                aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStart(_) |
+                aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStart(_) => {
+                    let chunk = create_chunk(
+                        &payload.model,
+                        ChatCompletionChunkChoiceDelta::Role {
+                            role: "assistant".to_string(),
+                        },
+                        None
+                    );
                     yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
                 },
-                aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStop(_event) => {
-                    let chunk = ChatCompletionChunk {
-                        id: Uuid::new_v4().to_string(),
-                        object: "chat.completion.chunk".to_string(),
-                        created: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs(),
-                        model: payload.model.clone(),
-                        choices: vec![ChatCompletionChunkChoice {
-                            delta: ChatCompletionChunkChoiceDelta::Content {
-                                content: "".to_string(),
-                            },
-                            index: 0,
-                            finish_reason: Some("stop".to_string()),
-                        }],
-                    };
-                    yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
-                },
-                aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStart(_event) => {
-                    let chunk = ChatCompletionChunk {
-                        id: Uuid::new_v4().to_string(),
-                        object: "chat.completion.chunk".to_string(),
-                        created: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs(),
-                        model: payload.model.clone(),
-                        choices: vec![ChatCompletionChunkChoice {
-                            delta: ChatCompletionChunkChoiceDelta::Role {
-                                role: "assistant".to_string(),
-                            },
-                            index: 0,
-                            finish_reason: None,
-                        }],
-                    };
-                    yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
-                },
-                aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStop(_event) => {
-                    let chunk = ChatCompletionChunk {
-                        id: Uuid::new_v4().to_string(),
-                        object: "chat.completion.chunk".to_string(),
-                        created: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs(),
-                        model: payload.model.clone(),
-                        choices: vec![ChatCompletionChunkChoice {
-                            delta: ChatCompletionChunkChoiceDelta::Content {
-                                content: "".to_string(),
-                            },
-                            index: 0,
-                            finish_reason: Some("stop".to_string()),
-                        }],
-                    };
+                aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStop(_) |
+                aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStop(_) => {
+                    let chunk = create_chunk(
+                        &payload.model,
+                        ChatCompletionChunkChoiceDelta::Content {
+                            content: String::new(),
+                        },
+                        Some("stop".to_string())
+                    );
                     yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
                 },
                 aws_sdk_bedrockruntime::types::ConverseStreamOutput::Metadata(_event) => {
                     // We can ignore metadata events for now
                     continue;
                 },
-                // aws_sdk_bedrockruntime::types::ConverseStreamOutput::Unknown => {
-                //     tracing::error!("Unknown stream chunk");
-                //     let error_response = ErrorResponse { error: "Unknown stream chunk".to_string() };
-                //     yield Ok(Event::default().data(serde_json::to_string(&error_response).unwrap()));
-                // }
                 _ => {
                     tracing::warn!("Unknown stream chunk type");
                     continue;
