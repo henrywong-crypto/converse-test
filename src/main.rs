@@ -1,3 +1,13 @@
+// Constants
+// Configuration constants
+const DEFAULT_AWS_REGION: &str = "us-east-1";
+
+// Message constants
+const CHAT_COMPLETION_OBJECT: &str = "chat.completion.chunk";
+const ASSISTANT_ROLE: &str = "assistant";
+const SSE_DONE_MESSAGE: &str = "[DONE]";
+const STOP_REASON: &str = "stop";
+
 use aws_config::BehaviorVersion;
 use aws_sdk_bedrockruntime::{
     Client,
@@ -19,6 +29,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 use void::Void;
 
+// Error types
 #[derive(Debug, Serialize, thiserror::Error)]
 pub enum ChatCompletionError {
     #[error("Bedrock API error: {0}")]
@@ -286,7 +297,7 @@ fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec
     (system_blocks, non_system_messages)
 }
 
-// Helper function to create a chat completion chunk
+/// Helper function to create a chat completion chunk with standardized structure
 fn create_chunk(
     model: &str,
     role_or_content: ChatCompletionChunkChoiceDelta,
@@ -294,7 +305,7 @@ fn create_chunk(
 ) -> ChatCompletionChunk {
     ChatCompletionChunk {
         id: Uuid::new_v4().to_string(),
-        object: "chat.completion.chunk".to_string(),
+        object: CHAT_COMPLETION_OBJECT.to_string(),
         created: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("SystemTime before Unix epoch")
@@ -308,26 +319,96 @@ fn create_chunk(
     }
 }
 
-// Main chat completions handler
+/// Creates a Bedrock client with default configuration
+async fn create_bedrock_client() -> Client {
+    let sdk_config = aws_config::defaults(BehaviorVersion::latest())
+        .region(DEFAULT_AWS_REGION)
+        .load()
+        .await;
+    Client::new(&sdk_config)
+}
+
+/// Handles content block delta events by creating appropriate chunks
+fn handle_content_block_delta(
+    model: &str,
+    event: aws_sdk_bedrockruntime::types::ContentBlockDeltaEvent,
+) -> Result<Event, ChatCompletionError> {
+    let content = match event.delta {
+        Some(aws_sdk_bedrockruntime::types::ContentBlockDelta::Text(text)) => text,
+        _ => String::new(),
+    };
+
+    let chunk = create_chunk(
+        model,
+        ChatCompletionChunkChoiceDelta::Content { content },
+        None,
+    );
+
+    create_sse_event(&chunk)
+}
+
+/// Handles message start events by creating role chunks
+fn handle_message_start(model: &str) -> Result<Event, ChatCompletionError> {
+    let chunk = create_chunk(
+        model,
+        ChatCompletionChunkChoiceDelta::Role {
+            role: ASSISTANT_ROLE.to_string(),
+        },
+        None,
+    );
+
+    create_sse_event(&chunk)
+}
+
+/// Handles message stop events by creating final chunks
+fn handle_message_stop(model: &str) -> Result<Event, ChatCompletionError> {
+    let chunk = create_chunk(
+        model,
+        ChatCompletionChunkChoiceDelta::Content {
+            content: String::new(),
+        },
+        Some(STOP_REASON.to_string()),
+    );
+
+    create_sse_event(&chunk)
+}
+
+/// Handles metadata events by creating usage information chunks
+fn handle_metadata(
+    model: &str,
+    usage: aws_sdk_bedrockruntime::types::TokenUsage,
+) -> Result<Event, ChatCompletionError> {
+    let chunk = create_chunk(
+        model,
+        ChatCompletionChunkChoiceDelta::Content {
+            content: format!(
+                "{{\"usage\": {{\"input_tokens\": {}, \"output_tokens\": {}}}}}",
+                usage.input_tokens, usage.output_tokens
+            ),
+        },
+        None,
+    );
+    create_sse_event(&chunk)
+}
+
+/// Creates an SSE event from a chunk
+fn create_sse_event(chunk: &ChatCompletionChunk) -> Result<Event, ChatCompletionError> {
+    Ok(Event::default().data(
+        serde_json::to_string(&chunk)
+            .map_err(|e| ChatCompletionError::StreamError(e.to_string()))?,
+    ))
+}
+
+/// Main chat completions handler that processes requests and returns SSE streams
 async fn chat_completions(
     Json(payload): Json<ChatCompletionsRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>, ChatCompletionError> {
-    let sdk_config = aws_config::defaults(BehaviorVersion::latest())
-        .region("us-east-1")
-        .load()
-        .await;
-
-    let client = Client::new(&sdk_config);
-
-    // Create a model_id variable as requested by the user.
-    let model_id = &payload.model;
-
-    // Convert each OpenaiMessage to aws_sdk_bedrockruntime::types::Message
+    let client = create_bedrock_client().await;
     let (system_content_blocks, messages) = process_messages(&payload.messages);
 
     let response_stream = client
         .converse_stream()
-        .model_id(model_id)
+        .model_id(&payload.model)
         .set_system(Some(system_content_blocks))
         .set_messages(Some(messages))
         .send()
@@ -342,63 +423,27 @@ async fn chat_completions(
         while let Some(part) = stream.recv().await.map_err(|e| ChatCompletionError::StreamError(e.to_string()))? {
             match part {
                 aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockDelta(event) => {
-                    let content = match event.delta {
-                        Some(aws_sdk_bedrockruntime::types::ContentBlockDelta::Text(text)) => text,
-                        _ => String::new(),
-                    };
-                    let chunk = create_chunk(
-                        &payload.model,
-                        ChatCompletionChunkChoiceDelta::Content { content },
-                        None
-                    );
-                    yield Ok(Event::default().data(serde_json::to_string(&chunk).map_err(|e| ChatCompletionError::StreamError(e.to_string()))?));
+                    yield handle_content_block_delta(&payload.model, event);
                 },
                 aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStart(_) |
                 aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStart(_) => {
-                    let chunk = create_chunk(
-                        &payload.model,
-                        ChatCompletionChunkChoiceDelta::Role {
-                            role: "assistant".to_string(),
-                        },
-                        None
-                    );
-                    yield Ok(Event::default().data(serde_json::to_string(&chunk).map_err(|e| ChatCompletionError::StreamError(e.to_string()))?));
+                    yield handle_message_start(&payload.model);
                 },
                 aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStop(_) |
                 aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStop(_) => {
-                    let chunk = create_chunk(
-                        &payload.model,
-                        ChatCompletionChunkChoiceDelta::Content {
-                            content: String::new(),
-                        },
-                        Some("stop".to_string())
-                    );
-                    yield Ok(Event::default().data(serde_json::to_string(&chunk).map_err(|e| ChatCompletionError::StreamError(e.to_string()))?));
+                    yield handle_message_stop(&payload.model);
                 },
                 aws_sdk_bedrockruntime::types::ConverseStreamOutput::Metadata(event) => {
                     if let Some(usage) = event.usage {
-                        let chunk = create_chunk(
-                            &payload.model,
-                            ChatCompletionChunkChoiceDelta::Content {
-                                content: format!(
-                                    "{{\"usage\": {{\"input_tokens\": {}, \"output_tokens\": {}}}}}",
-                                    usage.input_tokens,
-                                    usage.output_tokens
-                                ),
-                            },
-                            None
-                        );
-                        yield Ok(Event::default().data(serde_json::to_string(&chunk).map_err(|e| ChatCompletionError::StreamError(e.to_string()))?));
+                        yield handle_metadata(&payload.model, usage);
                     }
-                    continue;
                 },
                 _ => {
                     tracing::warn!("Unknown stream chunk type");
-                    continue;
                 }
             }
         }
-        yield Ok(Event::default().data("[DONE]"));
+        yield Ok(Event::default().data(SSE_DONE_MESSAGE));
     };
 
     Ok(Sse::new(sse_stream))
