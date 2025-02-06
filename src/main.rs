@@ -90,6 +90,16 @@ pub struct ChatCompletionChunk {
     created: u64,
     model: String,
     choices: Vec<ChatCompletionChunkChoice>,
+    usage: Option<Usage>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct Usage {
+    completion_tokens: i32,
+    prompt_tokens: i32,
+    total_tokens: i32,
+    completion_tokens_details: Option<serde_json::Value>,
+    prompt_tokens_details: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Debug)]
@@ -102,17 +112,8 @@ pub struct ChatCompletionChunkChoice {
 #[derive(Serialize, Debug)]
 #[serde(untagged)]
 pub enum ChatCompletionChunkChoiceDelta {
-    Role {
-        role: String,
-    },
-    Content {
-        content: String,
-    },
-    Usage {
-        prompt_tokens: i32,
-        completion_tokens: i32,
-        total_tokens: i32,
-    },
+    Role { role: String },
+    Content { content: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,6 +326,7 @@ fn create_chunk(
             index: 0,
             finish_reason,
         }],
+        usage: None,
     }
 }
 
@@ -387,15 +389,20 @@ fn handle_metadata(
     model: &str,
     usage: aws_sdk_bedrockruntime::types::TokenUsage,
 ) -> Result<Event, ChatCompletionError> {
-    let chunk = create_chunk(
+    let mut chunk = create_chunk(
         model,
-        ChatCompletionChunkChoiceDelta::Usage {
-            prompt_tokens: usage.input_tokens,
-            completion_tokens: usage.output_tokens,
-            total_tokens: usage.total_tokens,
+        ChatCompletionChunkChoiceDelta::Content {
+            content: String::new(),
         },
         None,
     );
+    chunk.usage = Some(Usage {
+        prompt_tokens: usage.input_tokens,
+        completion_tokens: usage.output_tokens,
+        total_tokens: usage.total_tokens,
+        completion_tokens_details: None,
+        prompt_tokens_details: None,
+    });
     create_sse_event(&chunk)
 }
 
@@ -588,5 +595,26 @@ mod tests {
         assert_eq!(request.model, "gpt-4");
         assert_eq!(request.messages.len(), 1);
         assert_eq!(request.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn test_metadata_handling() {
+        let model = "test-model";
+        let usage = aws_sdk_bedrockruntime::types::TokenUsage::builder()
+            .input_tokens(10)
+            .output_tokens(20)
+            .total_tokens(30)
+            .build()
+            .unwrap();
+
+        let result = handle_metadata(model, usage).unwrap();
+        let data = result.data.unwrap();
+        let chunk: ChatCompletionChunk = serde_json::from_str(&data).unwrap();
+
+        assert!(chunk.usage.is_some());
+        let usage = chunk.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 20);
+        assert_eq!(usage.total_tokens, 30);
     }
 }
