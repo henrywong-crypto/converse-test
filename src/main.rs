@@ -162,7 +162,6 @@ pub trait ChatProvider {
     ) -> Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>;
 }
 
-#[derive(Clone)]
 pub struct BedrockProvider {
     client: Client,
 }
@@ -228,12 +227,7 @@ const DEFAULT_AWS_REGION: &str = "us-east-1";
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let bedrock_provider = BedrockProvider::new().await;
-
-    let app = Router::new().route(
-        "/chat/completions",
-        post(move |json| chat_completions(json, bedrock_provider)),
-    );
+    let app = Router::new().route("/chat/completions", post(chat_completions));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     axum::serve(listener, app).await?;
@@ -532,7 +526,8 @@ fn create_sse_event(chunk: &ChatCompletionChunk) -> Result<Event, ChatCompletion
 
 async fn chat_completions(
     Json(payload): Json<ChatCompletionsRequest>,
-    provider: BedrockProvider,
 ) -> Sse<impl Stream<Item = Result<Event, ChatCompletionError>>> {
+    let provider = BedrockProvider::new().await;
+
     provider.chat_completions_stream(payload).await
 }
