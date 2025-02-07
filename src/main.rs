@@ -32,7 +32,7 @@ use uuid::Uuid;
 use void::Void;
 
 mod good;
-use good::{ChatCompletionsRequest, Content, MessageContent, OpenaiMessage, Role};
+use good::{ChatCompletionsRequest, Content, MessageContent, OpenaiMessage, Role, process_content, process_system_content};
 
 #[derive(Error, Debug)]
 pub enum ApiError {
@@ -183,6 +183,10 @@ impl ChatProvider for BedrockProvider {
         payload: ChatCompletionsRequest,
     ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
         let (system_content_blocks, messages) = process_messages(&payload.messages);
+        
+        // Generate consistent id and timestamp for all chunks
+        let completion_id = Uuid::new_v4().to_string();
+        let created_timestamp = Utc::now().timestamp();
 
         let mut stream = self
             .client
@@ -199,7 +203,7 @@ impl ChatProvider for BedrockProvider {
             loop {
                 match stream.recv().await {
                     Ok(Some(event)) => {
-                        if let sse_event = handle_stream_event(&payload.model, event) {
+                        if let sse_event = handle_stream_event(&payload.model, &completion_id, created_timestamp, event) {
                             yield Ok(sse_event);
                         }
                     }
@@ -211,6 +215,8 @@ impl ChatProvider for BedrockProvider {
                         tracing::error!("Stream error: {}", e);
                         // Send an error finish reason
                         let error_chunk = ChatCompletionChunkBuilder::new()
+                            .id(completion_id.clone())
+                            .created(created_timestamp)
                             .model(payload.model.clone())
                             .choices(vec![ChatCompletionChunkChoice {
                                 delta: ChatCompletionChunkChoiceDelta::Content {
@@ -245,30 +251,6 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-fn process_content(content: &MessageContent) -> Vec<ContentBlock> {
-    match content {
-        MessageContent::String(text) => vec![ContentBlock::Text(text.clone())],
-        MessageContent::Array(contents) => contents
-            .iter()
-            .map(|c| match c {
-                Content::Text { text } => ContentBlock::Text(text.clone()),
-            })
-            .collect(),
-    }
-}
-
-fn process_system_content(content: &MessageContent) -> Vec<SystemContentBlock> {
-    match content {
-        MessageContent::String(text) => vec![SystemContentBlock::Text(text.clone())],
-        MessageContent::Array(contents) => contents
-            .iter()
-            .map(|c| match c {
-                Content::Text { text } => SystemContentBlock::Text(text.clone()),
-            })
-            .collect(),
-    }
 }
 
 fn process_conversation_message(msg: &OpenaiMessage) -> Option<Message> {
@@ -306,6 +288,8 @@ fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec
 /// Handles different stream events and creates appropriate chunks
 fn handle_stream_event(
     model: &str,
+    completion_id: &str,
+    created_timestamp: i64,
     event: aws_sdk_bedrockruntime::types::ConverseStreamOutput,
 ) -> Event {
     let chunk = match event {
@@ -319,6 +303,10 @@ fn handle_stream_event(
                 .unwrap_or_default();
 
             ChatCompletionChunkBuilder::new()
+                .id(completion_id.to_string())
+                .created(created_timestamp)
+                .id(completion_id.to_string())
+                .created(created_timestamp)
                 .model(model.to_string())
                 .choices(vec![ChatCompletionChunkChoice {
                     delta: ChatCompletionChunkChoiceDelta::Content { content },
@@ -330,6 +318,8 @@ fn handle_stream_event(
         aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStart(_)
         | aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStart(_) => {
             ChatCompletionChunkBuilder::new()
+                .id(completion_id.to_string())
+                .created(created_timestamp)
                 .model(model.to_string())
                 .choices(vec![ChatCompletionChunkChoice {
                     delta: ChatCompletionChunkChoiceDelta::Role {
@@ -343,6 +333,8 @@ fn handle_stream_event(
         aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStop(_)
         | aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStop(_) => {
             ChatCompletionChunkBuilder::new()
+                .id(completion_id.to_string())
+                .created(created_timestamp)
                 .model(model.to_string())
                 .choices(vec![ChatCompletionChunkChoice {
                     delta: ChatCompletionChunkChoiceDelta::Content {
@@ -375,9 +367,11 @@ fn handle_stream_event(
             } else {
                 tracing::warn!("No usage data in Metadata event");
                 ChatCompletionChunkBuilder::new()
-                    .id(Uuid::new_v4().to_string())
+                    .id(completion_id.to_string())
+                    .created(created_timestamp)
+                    .id(completion_id.to_string())
                     .object(CHAT_COMPLETION_OBJECT.to_string())
-                    .created(Utc::now().timestamp())
+                    .created(created_timestamp)
                     .model(model.to_string())
                     .choices(vec![ChatCompletionChunkChoice {
                         delta: ChatCompletionChunkChoiceDelta::Content {

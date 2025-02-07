@@ -77,6 +77,32 @@ where
     deserializer.deserialize_any(StringOrArray(PhantomData))
 }
 
+use aws_sdk_bedrockruntime::types::{ContentBlock, SystemContentBlock};
+
+pub fn process_content(content: &MessageContent) -> Vec<ContentBlock> {
+    match content {
+        MessageContent::String(text) => vec![ContentBlock::Text(text.clone())],
+        MessageContent::Array(contents) => contents
+            .iter()
+            .map(|c| match c {
+                Content::Text { text } => ContentBlock::Text(text.clone()),
+            })
+            .collect(),
+    }
+}
+
+pub fn process_system_content(content: &MessageContent) -> Vec<SystemContentBlock> {
+    match content {
+        MessageContent::String(text) => vec![SystemContentBlock::Text(text.clone())],
+        MessageContent::Array(contents) => contents
+            .iter()
+            .map(|c| match c {
+                Content::Text { text } => SystemContentBlock::Text(text.clone()),
+            })
+            .collect(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionsRequest {
     /// ID of the model to use.
