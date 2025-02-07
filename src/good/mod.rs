@@ -1,3 +1,3 @@
 mod good;
 
-pub use good::{Content, MessageContent, OpenaiMessage, Role};
+pub use good::{ChatCompletionsRequest, Content, MessageContent, OpenaiMessage, Role};
