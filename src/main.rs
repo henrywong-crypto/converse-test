@@ -16,6 +16,7 @@ use axum::{
     response::sse::{Event, Sse},
     routing::post,
 };
+use chrono::prelude::*;
 use either::Either;
 use futures::stream::Stream;
 use itertools::Itertools;
@@ -27,8 +28,6 @@ use std::marker::PhantomData;
 use std::str::FromStr;
 use uuid::Uuid;
 use void::Void;
-
-use chrono::prelude::*;
 
 // Error types
 #[derive(Debug, Serialize, thiserror::Error)]
