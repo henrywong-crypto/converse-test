@@ -185,18 +185,24 @@ impl ChatProvider for BedrockProvider {
     ) -> Sse<impl Stream<Item = Result<Event, ChatCompletionError>>> {
         let (system_content_blocks, messages) = process_messages(&payload.messages);
 
-        let mut stream = self
+        let stream_result = self
             .client
             .converse_stream()
             .model_id(&payload.model)
             .set_system(Some(system_content_blocks))
             .set_messages(Some(messages))
             .send()
-            .await
-            .unwrap()
-            .stream;
+            .await;
 
         let sse_stream = async_stream::stream! {
+            let mut stream = match stream_result {
+                Ok(response) => response.stream,
+                Err(e) => {
+                    yield Err(ChatCompletionError::BedrockApi(e.to_string()));
+                    return;
+                }
+            };
+
             match stream.recv().await {
                 Ok(Some(event)) => {
                     match handle_stream_event(&payload.model, event) {
