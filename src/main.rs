@@ -161,7 +161,7 @@ pub trait ChatProvider {
     async fn chat_completions_stream(
         self,
         request: ChatCompletionsRequest,
-    ) -> Result<Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>, ChatCompletionError>;
+    ) -> Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>;
 }
 
 #[derive(Clone)]
@@ -185,8 +185,7 @@ impl ChatProvider for BedrockProvider {
     async fn chat_completions_stream(
         self,
         payload: ChatCompletionsRequest,
-    ) -> Result<Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>, ChatCompletionError>
-    {
+    ) -> Sse<impl Stream<Item = Result<Event, ChatCompletionError>>> {
         let (system_content_blocks, messages) = process_messages(&payload.messages);
 
         let mut stream = self
@@ -197,7 +196,7 @@ impl ChatProvider for BedrockProvider {
             .set_messages(Some(messages))
             .send()
             .await
-            .map_err(|e| ChatCompletionError::BedrockApi(e.to_string()))?
+            .unwrap()
             .stream;
 
         let sse_stream = async_stream::stream! {
@@ -221,7 +220,7 @@ impl ChatProvider for BedrockProvider {
             yield Ok(Event::default().data(SSE_DONE_MESSAGE));
         };
 
-        Ok(Sse::new(sse_stream))
+        Sse::new(sse_stream)
     }
 }
 
@@ -537,5 +536,5 @@ async fn chat_completions(
     Json(payload): Json<ChatCompletionsRequest>,
     provider: BedrockProvider,
 ) -> Sse<impl Stream<Item = Result<Event, ChatCompletionError>>> {
-    provider.chat_completions_stream(payload).await.unwrap()
+    provider.chat_completions_stream(payload).await
 }
