@@ -32,7 +32,10 @@ use uuid::Uuid;
 use void::Void;
 
 mod good;
-use good::{ChatCompletionsRequest, Content, MessageContent, OpenaiMessage, Role, process_content, process_system_content};
+use good::{
+    ChatCompletionsRequest, Content, MessageContent, OpenaiMessage, Role, process_content,
+    process_system_content,
+};
 
 #[derive(Error, Debug)]
 pub enum ApiError {
@@ -161,18 +164,11 @@ pub trait ChatProvider {
     ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>;
 }
 
-pub struct BedrockProvider {
-    client: Client,
-}
+pub struct BedrockProvider {}
 
 impl BedrockProvider {
     pub async fn new() -> Self {
-        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
-            .region(DEFAULT_AWS_REGION)
-            .load()
-            .await;
-        let client = Client::new(&sdk_config);
-        BedrockProvider { client }
+        BedrockProvider {}
     }
 }
 
@@ -183,13 +179,19 @@ impl ChatProvider for BedrockProvider {
         payload: ChatCompletionsRequest,
     ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
         let (system_content_blocks, messages) = process_messages(&payload.messages);
-        
+
         // Generate consistent id and timestamp for all chunks
         let completion_id = Uuid::new_v4().to_string();
         let created_timestamp = Utc::now().timestamp();
 
-        let mut stream = self
-            .client
+        // Create the client here
+        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
+            .region(DEFAULT_AWS_REGION)
+            .load()
+            .await;
+        let client = Client::new(&sdk_config);
+
+        let mut stream = client
             .converse_stream()
             .model_id(&payload.model)
             .set_system(Some(system_content_blocks))
