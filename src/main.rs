@@ -29,7 +29,6 @@ use std::str::FromStr;
 use uuid::Uuid;
 use void::Void;
 
-// Error types
 #[derive(Debug, Serialize, thiserror::Error)]
 pub enum ChatCompletionError {
     #[error("Bedrock API error: {0}")]
