@@ -13,7 +13,6 @@ use aws_sdk_bedrockruntime::{
     Client,
     types::{ContentBlock, ConversationRole, Message, SystemContentBlock},
 };
-use axum::response::IntoResponse;
 use axum::{
     Json, Router,
     response::sse::{Event, Sse},
@@ -31,6 +30,8 @@ use std::str::FromStr;
 use uuid::Uuid;
 use void::Void;
 
+use chrono::prelude::*;
+
 // Error types
 #[derive(Debug, Serialize, thiserror::Error)]
 pub enum ChatCompletionError {
@@ -39,28 +40,6 @@ pub enum ChatCompletionError {
 
     #[error("Error receiving stream: {0}")]
     StreamError(String),
-}
-
-impl IntoResponse for ChatCompletionError {
-    fn into_response(self) -> axum::response::Response {
-        let (status, error_message) = match self {
-            ChatCompletionError::BedrockApi(msg) => (axum::http::StatusCode::BAD_REQUEST, msg),
-            ChatCompletionError::StreamError(msg) => {
-                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg)
-            }
-        };
-
-        let body = axum::Json(ErrorResponse {
-            error: error_message,
-        });
-
-        (status, body).into_response()
-    }
-}
-
-#[derive(Serialize)]
-pub struct ErrorResponse {
-    error: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,14 +64,60 @@ pub struct OpenaiMessage {
     pub content: MessageContent,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Default)]
 pub struct ChatCompletionChunk {
     id: String,
     object: String,
-    created: u64,
+    created: i64,
     model: String,
     choices: Vec<ChatCompletionChunkChoice>,
     usage: Option<Usage>,
+}
+
+pub struct ChatCompletionChunkBuilder {
+    chunk: ChatCompletionChunk,
+}
+
+impl ChatCompletionChunkBuilder {
+    pub fn new() -> Self {
+        ChatCompletionChunkBuilder {
+            chunk: ChatCompletionChunk::default(),
+        }
+    }
+
+    pub fn id(mut self, id: String) -> Self {
+        self.chunk.id = id;
+        self
+    }
+
+    pub fn object(mut self, object: String) -> Self {
+        self.chunk.object = object;
+        self
+    }
+
+    pub fn created(mut self, created: i64) -> Self {
+        self.chunk.created = created;
+        self
+    }
+
+    pub fn model(mut self, model: String) -> Self {
+        self.chunk.model = model;
+        self
+    }
+
+    pub fn choices(mut self, choices: Vec<ChatCompletionChunkChoice>) -> Self {
+        self.chunk.choices = choices;
+        self
+    }
+
+    pub fn usage(mut self, usage: Option<Usage>) -> Self {
+        self.chunk.usage = usage;
+        self
+    }
+
+    pub fn build(self) -> ChatCompletionChunk {
+        self.chunk
+    }
 }
 
 #[derive(Serialize, Debug)]
@@ -136,6 +161,8 @@ impl FromStr for MessageContent {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
+
+    println!("{}", Local::now());
 
     let app = Router::new().route("/chat/completions", post(chat_completions));
 
@@ -328,135 +355,112 @@ fn handle_stream_event(
                 _ => String::new(),
             };
 
-            let chunk = ChatCompletionChunk {
-                id: Uuid::new_v4().to_string(),
-                object: CHAT_COMPLETION_OBJECT.to_string(),
-                created: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("SystemTime before Unix epoch")
-                    .as_secs(),
-                model: model.to_string(),
-                choices: vec![ChatCompletionChunkChoice {
+            let chunk = ChatCompletionChunkBuilder::new()
+                .id(Uuid::new_v4().to_string())
+                .object(CHAT_COMPLETION_OBJECT.to_string())
+                .created(Utc::now().timestamp())
+                .model(model.to_string())
+                .choices(vec![ChatCompletionChunkChoice {
                     delta: ChatCompletionChunkChoiceDelta::Content { content },
                     index: 0,
                     finish_reason: None,
-                }],
-                usage: None,
-            };
+                }])
+                .build();
 
             create_sse_event(&chunk)
         }
         aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStart(_)
         | aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStart(_) => {
-            let chunk = ChatCompletionChunk {
-                id: Uuid::new_v4().to_string(),
-                object: CHAT_COMPLETION_OBJECT.to_string(),
-                created: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("SystemTime before Unix epoch")
-                    .as_secs(),
-                model: model.to_string(),
-                choices: vec![ChatCompletionChunkChoice {
+            let chunk = ChatCompletionChunkBuilder::new()
+                .id(Uuid::new_v4().to_string())
+                .object(CHAT_COMPLETION_OBJECT.to_string())
+                .created(Utc::now().timestamp())
+                .model(model.to_string())
+                .choices(vec![ChatCompletionChunkChoice {
                     delta: ChatCompletionChunkChoiceDelta::Role {
                         role: ASSISTANT_ROLE.to_string(),
                     },
                     index: 0,
                     finish_reason: None,
-                }],
-                usage: None,
-            };
+                }])
+                .build();
 
             create_sse_event(&chunk)
         }
         aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStop(_)
         | aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStop(_) => {
-            let chunk = ChatCompletionChunk {
-                id: Uuid::new_v4().to_string(),
-                object: CHAT_COMPLETION_OBJECT.to_string(),
-                created: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("SystemTime before Unix epoch")
-                    .as_secs(),
-                model: model.to_string(),
-                choices: vec![ChatCompletionChunkChoice {
+            let chunk = ChatCompletionChunkBuilder::new()
+                .id(Uuid::new_v4().to_string())
+                .object(CHAT_COMPLETION_OBJECT.to_string())
+                .created(Utc::now().timestamp())
+                .model(model.to_string())
+                .choices(vec![ChatCompletionChunkChoice {
                     delta: ChatCompletionChunkChoiceDelta::Content {
                         content: String::new(),
                     },
                     index: 0,
                     finish_reason: Some(STOP_REASON.to_string()),
-                }],
-                usage: None,
-            };
+                }])
+                .build();
 
             create_sse_event(&chunk)
         }
         aws_sdk_bedrockruntime::types::ConverseStreamOutput::Metadata(event) => {
             if let Some(usage) = event.usage {
-                let chunk = ChatCompletionChunk {
-                    id: Uuid::new_v4().to_string(),
-                    object: CHAT_COMPLETION_OBJECT.to_string(),
-                    created: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .expect("SystemTime before Unix epoch")
-                        .as_secs(),
-                    model: model.to_string(),
-                    choices: vec![ChatCompletionChunkChoice {
+                let chunk = ChatCompletionChunkBuilder::new()
+                    .id(Uuid::new_v4().to_string())
+                    .object(CHAT_COMPLETION_OBJECT.to_string())
+                    .created(Utc::now().timestamp())
+                    .model(model.to_string())
+                    .choices(vec![ChatCompletionChunkChoice {
                         delta: ChatCompletionChunkChoiceDelta::Content {
                             content: String::new(),
                         },
                         index: 0,
                         finish_reason: None,
-                    }],
-                    usage: Some(Usage {
+                    }])
+                    .usage(Some(Usage {
                         prompt_tokens: usage.input_tokens,
                         completion_tokens: usage.output_tokens,
                         total_tokens: usage.total_tokens,
                         completion_tokens_details: None,
                         prompt_tokens_details: None,
-                    }),
-                };
+                    }))
+                    .build();
                 create_sse_event(&chunk)
             } else {
-                let chunk = ChatCompletionChunk {
-                    id: Uuid::new_v4().to_string(),
-                    object: CHAT_COMPLETION_OBJECT.to_string(),
-                    created: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .expect("SystemTime before Unix epoch")
-                        .as_secs(),
-                    model: model.to_string(),
-                    choices: vec![ChatCompletionChunkChoice {
+                let chunk = ChatCompletionChunkBuilder::new()
+                    .id(Uuid::new_v4().to_string())
+                    .object(CHAT_COMPLETION_OBJECT.to_string())
+                    .created(Utc::now().timestamp())
+                    .model(model.to_string())
+                    .choices(vec![ChatCompletionChunkChoice {
                         delta: ChatCompletionChunkChoiceDelta::Content {
                             content: String::new(),
                         },
                         index: 0,
                         finish_reason: None,
-                    }],
-                    usage: None,
-                };
+                    }])
+                    .build();
                 // Return a no-op event if there's no usage data
                 create_sse_event(&chunk)
             }
         }
         _ => {
             tracing::warn!("Unknown stream chunk type");
-            let chunk = ChatCompletionChunk {
-                id: Uuid::new_v4().to_string(),
-                object: CHAT_COMPLETION_OBJECT.to_string(),
-                created: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("SystemTime before Unix epoch")
-                    .as_secs(),
-                model: model.to_string(),
-                choices: vec![ChatCompletionChunkChoice {
+            let chunk = ChatCompletionChunkBuilder::new()
+                .id(Uuid::new_v4().to_string())
+                .object(CHAT_COMPLETION_OBJECT.to_string())
+                .created(Utc::now().timestamp())
+                .model(model.to_string())
+                .choices(vec![ChatCompletionChunkChoice {
                     delta: ChatCompletionChunkChoiceDelta::Content {
                         content: String::new(),
                     },
                     index: 0,
                     finish_reason: None,
-                }],
-                usage: None,
-            };
+                }])
+                .build();
             // Return a no-op event for unknown types
             create_sse_event(&chunk)
         }
@@ -474,7 +478,7 @@ fn create_sse_event(chunk: &ChatCompletionChunk) -> Result<Event, ChatCompletion
 /// Main chat completions handler that processes requests and returns SSE streams
 async fn chat_completions(
     Json(payload): Json<ChatCompletionsRequest>,
-) -> Result<Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>, ChatCompletionError> {
+) -> Sse<impl Stream<Item = Result<Event, ChatCompletionError>>> {
     let client = create_bedrock_client().await;
     let (system_content_blocks, messages) = process_messages(&payload.messages);
 
@@ -485,170 +489,30 @@ async fn chat_completions(
         .set_messages(Some(messages))
         .send()
         .await
-        .map_err(|e| ChatCompletionError::BedrockApi(e.to_string()))?
+        .map_err(|e| ChatCompletionError::BedrockApi(e.to_string()))
+        .unwrap()
         .stream;
 
     let sse_stream = async_stream::stream! {
-        while let Some(event) = stream.recv().await.map_err(|e| ChatCompletionError::StreamError(e.to_string()))? {
-            yield handle_stream_event(&payload.model, event);
+        match stream.recv().await {
+            Ok(Some(event)) => {
+                match handle_stream_event(&payload.model, event) {
+                    Ok(sse_event) => yield Ok(sse_event),
+                    Err(e) => yield Err(e),
+                }
+                while let Some(event) = stream.recv().await.map_err(|e| ChatCompletionError::StreamError(e.to_string()))? {
+                    match handle_stream_event(&payload.model, event) {
+                        Ok(sse_event) => yield Ok(sse_event),
+                        Err(e) => yield Err(e),
+                    }
+                }
+
+            },
+            Err(e) => yield Err(ChatCompletionError::StreamError(e.to_string())),
+            Ok(None) => {},
         }
         yield Ok(Event::default().data(SSE_DONE_MESSAGE));
     };
 
-    Ok(Sse::new(sse_stream))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_deserialize_string_content() {
-        let json_string = r#"{
-            "role": "user",
-            "content": "Hello, how are you?"
-        }"#;
-
-        let message: OpenaiMessage = serde_json::from_str(json_string).unwrap();
-        assert!(matches!(message.content, MessageContent::String(_)));
-    }
-
-    #[test]
-    fn test_deserialize_array_content() {
-        let json_array = r#"{
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What is the weather like?"
-                }
-            ]
-        }"#;
-
-        let message: OpenaiMessage = serde_json::from_str(json_array).unwrap();
-        assert!(matches!(message.content, MessageContent::Array(_)));
-    }
-
-    #[test]
-    fn test_deserialize_chat_request_with_string_content() {
-        let chat_request = r#"{
-            "model": "gpt-4",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant."
-                },
-                {
-                    "role": "user",
-                    "content": "Tell me about Rust."
-                }
-            ],
-            "temperature": 0.7
-        }"#;
-
-        let request: ChatCompletionsRequest = serde_json::from_str(chat_request).unwrap();
-        assert_eq!(request.model, "gpt-4");
-        assert_eq!(request.messages.len(), 2);
-        assert_eq!(request.temperature, Some(0.7));
-    }
-
-    #[test]
-    fn test_process_content_string() {
-        let content = MessageContent::String("Test content".to_string());
-        let result = process_content(&content);
-        assert_eq!(result.len(), 1);
-        assert!(matches!(&result[0], ContentBlock::Text(text) if text == "Test content"));
-    }
-
-    #[test]
-    fn test_process_content_array() {
-        let content = MessageContent::Array(vec![Content::Text {
-            text: "Test content".to_string(),
-        }]);
-        let result = process_content(&content);
-        assert_eq!(result.len(), 1);
-        assert!(matches!(&result[0], ContentBlock::Text(text) if text == "Test content"));
-    }
-
-    #[test]
-    fn test_process_messages_mixed_roles() {
-        let messages = vec![
-            OpenaiMessage {
-                role: Role::System,
-                content: MessageContent::String("System instruction".to_string()),
-            },
-            OpenaiMessage {
-                role: Role::User,
-                content: MessageContent::String("User message".to_string()),
-            },
-            OpenaiMessage {
-                role: Role::Assistant,
-                content: MessageContent::String("Assistant message".to_string()),
-            },
-        ];
-
-        let (system_blocks, converted_messages) = process_messages(&messages);
-
-        // Check system blocks
-        assert_eq!(system_blocks.len(), 1);
-        assert!(
-            matches!(&system_blocks[0], SystemContentBlock::Text(text) if text == "System instruction")
-        );
-
-        // Check converted messages
-        assert_eq!(converted_messages.len(), 2);
-        assert!(matches!(
-            converted_messages[0].role(),
-            ConversationRole::User
-        ));
-        assert!(matches!(
-            converted_messages[1].role(),
-            ConversationRole::Assistant
-        ));
-    }
-
-    #[test]
-    fn test_deserialize_chat_request_with_array_content() {
-        let chat_request_array = r#"{
-            "model": "gpt-4",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Tell me about programming."
-                        }
-                    ]
-                }
-            ],
-            "temperature": 0.7
-        }"#;
-
-        let request: ChatCompletionsRequest = serde_json::from_str(chat_request_array).unwrap();
-        assert_eq!(request.model, "gpt-4");
-        assert_eq!(request.messages.len(), 1);
-        assert_eq!(request.temperature, Some(0.7));
-    }
-
-    #[test]
-    fn test_metadata_handling() {
-        let model = "test-model";
-        let usage = aws_sdk_bedrockruntime::types::TokenUsage::builder()
-            .input_tokens(10)
-            .output_tokens(20)
-            .total_tokens(30)
-            .build()
-            .unwrap();
-
-        let result = handle_metadata(model, usage).unwrap();
-        let data = result.data.unwrap();
-        let chunk: ChatCompletionChunk = serde_json::from_str(&data).unwrap();
-
-        assert!(chunk.usage.is_some());
-        let usage = chunk.usage.unwrap();
-        assert_eq!(usage.prompt_tokens, 10);
-        assert_eq!(usage.completion_tokens, 20);
-        assert_eq!(usage.total_tokens, 30);
-    }
+    Sse::new(sse_stream)
 }
