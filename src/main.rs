@@ -29,20 +29,8 @@ use std::str::FromStr;
 use uuid::Uuid;
 use void::Void;
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    System,
-    Assistant,
-    User,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-pub enum Content {
-    #[serde(rename = "text")]
-    Text { text: String },
-}
+mod good;
+use good::{Content, Role};
 
 #[derive(Debug, Deserialize)]
 pub struct OpenaiMessage {
