@@ -196,11 +196,36 @@ impl ChatProvider for BedrockProvider {
             .stream;
 
         let sse_stream = async_stream::stream! {
-            while let Ok(Some(event)) = stream.recv().await {
-                if let sse_event = handle_stream_event(&payload.model, event) {
-                    yield Ok(sse_event);
+            loop {
+                match stream.recv().await {
+                    Ok(Some(event)) => {
+                        if let sse_event = handle_stream_event(&payload.model, event) {
+                            yield Ok(sse_event);
+                        }
+                    }
+                    Ok(None) => {
+                        // Stream completed normally
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!("Stream error: {}", e);
+                        // Send an error finish reason
+                        let error_chunk = ChatCompletionChunkBuilder::new()
+                            .model(payload.model.clone())
+                            .choices(vec![ChatCompletionChunkChoice {
+                                delta: ChatCompletionChunkChoiceDelta::Content {
+                                    content: String::new(),
+                                },
+                                index: 0,
+                                finish_reason: Some("error".to_string()),
+                            }])
+                            .build();
+                        yield Ok(create_sse_event(&error_chunk));
+                        break;
+                    }
                 }
             }
+            // Send final [DONE] message
             yield Ok(Event::default().data(SSE_DONE_MESSAGE));
         };
 
