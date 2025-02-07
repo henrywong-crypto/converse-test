@@ -29,15 +29,6 @@ use std::str::FromStr;
 use uuid::Uuid;
 use void::Void;
 
-#[derive(Debug, Serialize, thiserror::Error)]
-pub enum ChatCompletionError {
-    #[error("Bedrock API error: {0}")]
-    BedrockApi(String),
-
-    #[error("Error receiving stream: {0}")]
-    StreamError(String),
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -172,7 +163,7 @@ pub trait ChatProvider {
     async fn chat_completions_stream(
         self,
         request: ChatCompletionsRequest,
-    ) -> Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>;
+    ) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>;
 }
 
 pub struct BedrockProvider {
@@ -195,7 +186,7 @@ impl ChatProvider for BedrockProvider {
     async fn chat_completions_stream(
         self,
         payload: ChatCompletionsRequest,
-    ) -> Sse<impl Stream<Item = Result<Event, ChatCompletionError>>> {
+    ) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
         let (system_content_blocks, messages) = process_messages(&payload.messages);
 
         let stream_result = self
@@ -211,26 +202,40 @@ impl ChatProvider for BedrockProvider {
             let mut stream = match stream_result {
                 Ok(response) => response.stream,
                 Err(e) => {
-                    yield Err(ChatCompletionError::BedrockApi(e.to_string()));
+                    tracing::error!("Bedrock API error: {}", e);
+                    // Return an error event to the client
+                    yield Ok(Event::default().data(
+                        serde_json::to_string(&ChatCompletionChunkBuilder::new()
+                            .model(payload.model.clone())
+                            .choices(vec![ChatCompletionChunkChoice {
+                                delta: ChatCompletionChunkChoiceDelta::Content {
+                                    content: "An error occurred while processing your request.".to_string(),
+                                },
+                                index: 0,
+                                finish_reason: Some("error".to_string()),
+                            }])
+                            .build()
+                        ).unwrap_or_default()
+                    ));
+                    yield Ok(Event::default().data(SSE_DONE_MESSAGE));
                     return;
                 }
             };
 
             match stream.recv().await {
                 Ok(Some(event)) => {
-                    match handle_stream_event(&payload.model, event) {
-                        Ok(sse_event) => yield Ok(sse_event),
-                        Err(e) => yield Err(e),
+                    if let sse_event = handle_stream_event(&payload.model, event) {
+                        yield Ok(sse_event);
                     }
-                    while let Some(event) = stream.recv().await.map_err(|e| ChatCompletionError::StreamError(e.to_string()))? {
-                        match handle_stream_event(&payload.model, event) {
-                            Ok(sse_event) => yield Ok(sse_event),
-                            Err(e) => yield Err(e),
+                    while let Ok(Some(event)) = stream.recv().await {
+                        if let sse_event = handle_stream_event(&payload.model, event) {
+                            yield Ok(sse_event);
                         }
                     }
-
                 },
-                Err(e) => yield Err(ChatCompletionError::StreamError(e.to_string())),
+                Err(e) => {
+                    tracing::error!("Stream error: {}", e);
+                },
                 Ok(None) => {},
             }
             yield Ok(Event::default().data(SSE_DONE_MESSAGE));
@@ -417,7 +422,7 @@ fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec
 fn handle_stream_event(
     model: &str,
     event: aws_sdk_bedrockruntime::types::ConverseStreamOutput,
-) -> Result<Event, ChatCompletionError> {
+) -> Event {
     let chunk = match event {
         aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockDelta(event) => {
             let content = event
@@ -518,16 +523,17 @@ fn handle_stream_event(
 }
 
 /// Creates an SSE event from a chunk
-fn create_sse_event(chunk: &ChatCompletionChunk) -> Result<Event, ChatCompletionError> {
-    Ok(Event::default().data(
-        serde_json::to_string(&chunk)
-            .map_err(|e| ChatCompletionError::StreamError(e.to_string()))?,
-    ))
+fn create_sse_event(chunk: &ChatCompletionChunk) -> Event {
+    let data = serde_json::to_string(&chunk).unwrap_or_else(|e| {
+        tracing::error!("Failed to serialize chunk: {}", e);
+        String::from("{}")
+    });
+    Event::default().data(data)
 }
 
 async fn chat_completions(
     Json(payload): Json<ChatCompletionsRequest>,
-) -> Sse<impl Stream<Item = Result<Event, ChatCompletionError>>> {
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
     let provider = BedrockProvider::new().await;
 
     provider.chat_completions_stream(payload).await
