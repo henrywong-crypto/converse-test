@@ -272,32 +272,38 @@ fn process_system_content(content: &MessageContent) -> Vec<SystemContentBlock> {
     }
 }
 
+fn process_conversation_message(msg: &OpenaiMessage) -> Option<Message> {
+    let content_blocks = process_content(&msg.content);
+    let role = match msg.role {
+        Role::Assistant => ConversationRole::Assistant,
+        Role::User => ConversationRole::User,
+        Role::System => return None, // Should not happen due to partition_map
+    };
+
+    Message::builder()
+        .role(role)
+        .set_content(Some(content_blocks))
+        .build()
+        .ok()
+}
+
 fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec<Message>) {
-    let (system_blocks, non_system_messages): (Vec<_>, Vec<_>) = messages
-        .iter()
-        .map(|msg| match msg.role {
+    let (system_blocks, conversation_messages): (Vec<_>, Vec<_>) =
+        messages.iter().partition_map(|msg| match msg.role {
+            // System messages go to the left branch
             Role::System => Either::Left(process_system_content(&msg.content)),
-            Role::Assistant | Role::User => {
-                let content_blocks = process_content(&msg.content);
-                let role = match msg.role {
-                    Role::Assistant => ConversationRole::Assistant,
-                    Role::User => ConversationRole::User,
-                    _ => unreachable!(),
-                };
-                Either::Right(
-                    Message::builder()
-                        .role(role)
-                        .set_content(Some(content_blocks))
-                        .build()
-                        .ok(),
-                )
-            }
-        })
-        .partition_map(|x| x);
+            // Conversation messages (User/Assistant) go to the right branch
+            Role::Assistant | Role::User => Either::Right(process_conversation_message(msg)),
+        });
 
     (
+        // Flatten the nested system blocks into a single vector
         system_blocks.into_iter().flatten().collect(),
-        non_system_messages.into_iter().filter_map(|x| x).collect(),
+        // Filter out None values from conversation messages
+        conversation_messages
+            .into_iter()
+            .filter_map(|x| x)
+            .collect(),
     )
 }
 
@@ -386,7 +392,7 @@ fn handle_stream_event(
         }
         aws_sdk_bedrockruntime::types::ConverseStreamOutput::Metadata(event) => {
             if let Some(usage) = event.usage {
-                let mut chunk = ChatCompletionChunk {
+                let chunk = ChatCompletionChunk {
                     id: Uuid::new_v4().to_string(),
                     object: CHAT_COMPLETION_OBJECT.to_string(),
                     created: std::time::SystemTime::now()
@@ -401,15 +407,14 @@ fn handle_stream_event(
                         index: 0,
                         finish_reason: None,
                     }],
-                    usage: None,
+                    usage: Some(Usage {
+                        prompt_tokens: usage.input_tokens,
+                        completion_tokens: usage.output_tokens,
+                        total_tokens: usage.total_tokens,
+                        completion_tokens_details: None,
+                        prompt_tokens_details: None,
+                    }),
                 };
-                chunk.usage = Some(Usage {
-                    prompt_tokens: usage.input_tokens,
-                    completion_tokens: usage.output_tokens,
-                    total_tokens: usage.total_tokens,
-                    completion_tokens_details: None,
-                    prompt_tokens_details: None,
-                });
                 create_sse_event(&chunk)
             } else {
                 let chunk = ChatCompletionChunk {
