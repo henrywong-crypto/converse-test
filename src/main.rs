@@ -411,14 +411,17 @@ fn handle_stream_event(
     model: &str,
     event: aws_sdk_bedrockruntime::types::ConverseStreamOutput,
 ) -> Result<Event, ChatCompletionError> {
-    match event {
+    let chunk = match event {
         aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockDelta(event) => {
-            let content = match event.delta {
-                Some(aws_sdk_bedrockruntime::types::ContentBlockDelta::Text(text)) => text,
-                _ => String::new(),
-            };
+            let content = event
+                .delta
+                .and_then(|d| match d {
+                    aws_sdk_bedrockruntime::types::ContentBlockDelta::Text(text) => Some(text),
+                    _ => None,
+                })
+                .unwrap_or_default();
 
-            let chunk = ChatCompletionChunkBuilder::new()
+            ChatCompletionChunkBuilder::new()
                 .id(Uuid::new_v4().to_string())
                 .object(CHAT_COMPLETION_OBJECT.to_string())
                 .created(Utc::now().timestamp())
@@ -428,13 +431,11 @@ fn handle_stream_event(
                     index: 0,
                     finish_reason: None,
                 }])
-                .build();
-
-            create_sse_event(&chunk)
+                .build()
         }
         aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStart(_)
         | aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStart(_) => {
-            let chunk = ChatCompletionChunkBuilder::new()
+            ChatCompletionChunkBuilder::new()
                 .id(Uuid::new_v4().to_string())
                 .object(CHAT_COMPLETION_OBJECT.to_string())
                 .created(Utc::now().timestamp())
@@ -446,13 +447,11 @@ fn handle_stream_event(
                     index: 0,
                     finish_reason: None,
                 }])
-                .build();
-
-            create_sse_event(&chunk)
+                .build()
         }
         aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStop(_)
         | aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStop(_) => {
-            let chunk = ChatCompletionChunkBuilder::new()
+            ChatCompletionChunkBuilder::new()
                 .id(Uuid::new_v4().to_string())
                 .object(CHAT_COMPLETION_OBJECT.to_string())
                 .created(Utc::now().timestamp())
@@ -464,13 +463,11 @@ fn handle_stream_event(
                     index: 0,
                     finish_reason: Some(STOP_REASON.to_string()),
                 }])
-                .build();
-
-            create_sse_event(&chunk)
+                .build()
         }
         aws_sdk_bedrockruntime::types::ConverseStreamOutput::Metadata(event) => {
             if let Some(usage) = event.usage {
-                let chunk = ChatCompletionChunkBuilder::new()
+                ChatCompletionChunkBuilder::new()
                     .id(Uuid::new_v4().to_string())
                     .object(CHAT_COMPLETION_OBJECT.to_string())
                     .created(Utc::now().timestamp())
@@ -489,10 +486,10 @@ fn handle_stream_event(
                         completion_tokens_details: None,
                         prompt_tokens_details: None,
                     }))
-                    .build();
-                create_sse_event(&chunk)
+                    .build()
             } else {
-                let chunk = ChatCompletionChunkBuilder::new()
+                tracing::warn!("No usage data in Metadata event");
+                ChatCompletionChunkBuilder::new()
                     .id(Uuid::new_v4().to_string())
                     .object(CHAT_COMPLETION_OBJECT.to_string())
                     .created(Utc::now().timestamp())
@@ -504,14 +501,12 @@ fn handle_stream_event(
                         index: 0,
                         finish_reason: None,
                     }])
-                    .build();
-                // Return a no-op event if there's no usage data
-                create_sse_event(&chunk)
+                    .build() // No usage data
             }
         }
         _ => {
             tracing::warn!("Unknown stream chunk type");
-            let chunk = ChatCompletionChunkBuilder::new()
+            ChatCompletionChunkBuilder::new()
                 .id(Uuid::new_v4().to_string())
                 .object(CHAT_COMPLETION_OBJECT.to_string())
                 .created(Utc::now().timestamp())
@@ -523,11 +518,11 @@ fn handle_stream_event(
                     index: 0,
                     finish_reason: None,
                 }])
-                .build();
-            // Return a no-op event for unknown types
-            create_sse_event(&chunk)
+                .build() // Handle unknown types
         }
-    }
+    };
+
+    create_sse_event(&chunk)
 }
 
 /// Creates an SSE event from a chunk
