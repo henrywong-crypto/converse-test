@@ -1,13 +1,11 @@
 // Constants
-// Configuration constants
-const DEFAULT_AWS_REGION: &str = "us-east-1";
-
 // Message constants
 const CHAT_COMPLETION_OBJECT: &str = "chat.completion.chunk";
 const ASSISTANT_ROLE: &str = "assistant";
 const SSE_DONE_MESSAGE: &str = "[DONE]";
 const STOP_REASON: &str = "stop";
 
+use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_bedrockruntime::{
     Client,
@@ -158,13 +156,87 @@ impl FromStr for MessageContent {
     }
 }
 
+#[async_trait]
+pub trait ChatProvider {
+    async fn chat_completions_stream(
+        self,
+        request: ChatCompletionsRequest,
+    ) -> Result<Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>, ChatCompletionError>;
+}
+
+#[derive(Clone)]
+pub struct BedrockProvider {
+    client: Client,
+}
+
+impl BedrockProvider {
+    pub async fn new() -> Self {
+        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
+            .region(DEFAULT_AWS_REGION)
+            .load()
+            .await;
+        let client = Client::new(&sdk_config);
+        BedrockProvider { client }
+    }
+}
+
+#[async_trait]
+impl ChatProvider for BedrockProvider {
+    async fn chat_completions_stream(
+        self,
+        payload: ChatCompletionsRequest,
+    ) -> Result<Sse<impl Stream<Item = Result<Event, ChatCompletionError>>>, ChatCompletionError>
+    {
+        let (system_content_blocks, messages) = process_messages(&payload.messages);
+
+        let mut stream = self
+            .client
+            .converse_stream()
+            .model_id(&payload.model)
+            .set_system(Some(system_content_blocks))
+            .set_messages(Some(messages))
+            .send()
+            .await
+            .map_err(|e| ChatCompletionError::BedrockApi(e.to_string()))?
+            .stream;
+
+        let sse_stream = async_stream::stream! {
+            match stream.recv().await {
+                Ok(Some(event)) => {
+                    match handle_stream_event(&payload.model, event) {
+                        Ok(sse_event) => yield Ok(sse_event),
+                        Err(e) => yield Err(e),
+                    }
+                    while let Some(event) = stream.recv().await.map_err(|e| ChatCompletionError::StreamError(e.to_string()))? {
+                        match handle_stream_event(&payload.model, event) {
+                            Ok(sse_event) => yield Ok(sse_event),
+                            Err(e) => yield Err(e),
+                        }
+                    }
+
+                },
+                Err(e) => yield Err(ChatCompletionError::StreamError(e.to_string())),
+                Ok(None) => {},
+            }
+            yield Ok(Event::default().data(SSE_DONE_MESSAGE));
+        };
+
+        Ok(Sse::new(sse_stream))
+    }
+}
+
+const DEFAULT_AWS_REGION: &str = "us-east-1";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    println!("{}", Local::now());
+    let bedrock_provider = BedrockProvider::new().await;
 
-    let app = Router::new().route("/chat/completions", post(chat_completions));
+    let app = Router::new().route(
+        "/chat/completions",
+        post(move |json| chat_completions(json, bedrock_provider)),
+    );
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     axum::serve(listener, app).await?;
@@ -334,15 +406,6 @@ fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec
     )
 }
 
-/// Creates a Bedrock client with default configuration
-async fn create_bedrock_client() -> Client {
-    let sdk_config = aws_config::defaults(BehaviorVersion::latest())
-        .region(DEFAULT_AWS_REGION)
-        .load()
-        .await;
-    Client::new(&sdk_config)
-}
-
 /// Handles different stream events and creates appropriate chunks
 fn handle_stream_event(
     model: &str,
@@ -475,44 +538,9 @@ fn create_sse_event(chunk: &ChatCompletionChunk) -> Result<Event, ChatCompletion
     ))
 }
 
-/// Main chat completions handler that processes requests and returns SSE streams
 async fn chat_completions(
     Json(payload): Json<ChatCompletionsRequest>,
+    provider: BedrockProvider,
 ) -> Sse<impl Stream<Item = Result<Event, ChatCompletionError>>> {
-    let client = create_bedrock_client().await;
-    let (system_content_blocks, messages) = process_messages(&payload.messages);
-
-    let mut stream = client
-        .converse_stream()
-        .model_id(&payload.model)
-        .set_system(Some(system_content_blocks))
-        .set_messages(Some(messages))
-        .send()
-        .await
-        .map_err(|e| ChatCompletionError::BedrockApi(e.to_string()))
-        .unwrap()
-        .stream;
-
-    let sse_stream = async_stream::stream! {
-        match stream.recv().await {
-            Ok(Some(event)) => {
-                match handle_stream_event(&payload.model, event) {
-                    Ok(sse_event) => yield Ok(sse_event),
-                    Err(e) => yield Err(e),
-                }
-                while let Some(event) = stream.recv().await.map_err(|e| ChatCompletionError::StreamError(e.to_string()))? {
-                    match handle_stream_event(&payload.model, event) {
-                        Ok(sse_event) => yield Ok(sse_event),
-                        Err(e) => yield Err(e),
-                    }
-                }
-
-            },
-            Err(e) => yield Err(ChatCompletionError::StreamError(e.to_string())),
-            Ok(None) => {},
-        }
-        yield Ok(Event::default().data(SSE_DONE_MESSAGE));
-    };
-
-    Sse::new(sse_stream)
+    provider.chat_completions_stream(payload).await.unwrap()
 }
