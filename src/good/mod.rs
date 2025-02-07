@@ -1,3 +1,3 @@
 mod good;
 
-pub use good::{Content, Role};
+pub use good::{Content, MessageContent, OpenaiMessage, Role};
