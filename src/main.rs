@@ -119,8 +119,8 @@ impl ChatCompletionChunkBuilder {
         self
     }
 
-    pub fn usage(mut self, usage: Option<Usage>) -> Self {
-        self.chunk.usage = usage;
+    pub fn usage(mut self, usage: Usage) -> Self {
+        self.chunk.usage = Some(usage);
         self
     }
 
@@ -409,10 +409,7 @@ fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec
         // Flatten the nested system blocks into a single vector
         system_blocks.into_iter().flatten().collect(),
         // Filter out None values from conversation messages
-        conversation_messages
-            .into_iter()
-            .flatten()
-            .collect(),
+        conversation_messages.into_iter().flatten().collect(),
     )
 }
 
@@ -477,13 +474,13 @@ fn handle_stream_event(
                         index: 0,
                         finish_reason: None,
                     }])
-                    .usage(Some(Usage {
+                    .usage(Usage {
                         prompt_tokens: usage.input_tokens,
                         completion_tokens: usage.output_tokens,
                         total_tokens: usage.total_tokens,
                         completion_tokens_details: None,
                         prompt_tokens_details: None,
-                    }))
+                    })
                     .build()
             } else {
                 tracing::warn!("No usage data in Metadata event");
