@@ -23,7 +23,30 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
-use void::Void;
+use std::error::Error as StdError;
+use std::fmt;
+
+// Stream-specific error type
+#[derive(Debug)]
+struct StreamError(String);
+
+impl fmt::Display for StreamError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl StdError for StreamError {}
+
+impl IntoResponse for StreamError {
+    fn into_response(self) -> axum::response::Response {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Stream error: {}", self.0),
+        )
+            .into_response()
+    }
+}
 
 mod constants;
 mod good;
@@ -141,7 +164,7 @@ pub trait ChatProvider {
     async fn chat_completions_stream(
         self,
         request: ChatCompletionsRequest,
-    ) -> anyhow::Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>>;
+    ) -> anyhow::Result<Sse<impl Stream<Item = Result<Event, StreamError>>>>;
 }
 
 pub struct BedrockProvider {}
@@ -157,7 +180,7 @@ impl ChatProvider for BedrockProvider {
     async fn chat_completions_stream(
         self,
         payload: ChatCompletionsRequest,
-    ) -> anyhow::Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>> {
+    ) -> anyhow::Result<Sse<impl Stream<Item = Result<Event, StreamError>>>> {
         let (system_content_blocks, messages) = process_messages(&payload.messages);
 
         // Generate consistent id and timestamp for all chunks
@@ -189,23 +212,7 @@ impl ChatProvider for BedrockProvider {
                             Ok(sse_event) => yield Ok(sse_event),
                             Err(e) => {
                                 tracing::error!("Error handling stream event: {}", e);
-                                // Attempt to send an error chunk
-                                let error_chunk = ChatCompletionChunkBuilder::new()
-                                    .id(completion_id.clone())
-                                    .created(created_timestamp)
-                                    .model(payload.model.clone())
-                                    .choices(vec![ChatCompletionChunkChoice {
-                                        delta: ChatCompletionChunkChoiceDelta::Content {
-                                            content: String::new(),
-                                        },
-                                        index: 0,
-                                        finish_reason: Some("error".to_string()),
-                                    }])
-                                    .build();
-                                // If serialization fails here, there's not much we can do, but at least log it
-                                if let Ok(sse_event) = create_sse_event(&error_chunk) {
-                                    yield Ok(sse_event);
-                                }
+                                yield Err(StreamError(format!("Failed to handle stream event: {}", e)));
                                 break;
                             }
                         }
@@ -216,23 +223,7 @@ impl ChatProvider for BedrockProvider {
                     }
                     Err(e) => {
                         tracing::error!("Stream error: {}", e);
-                        // Send an error finish reason
-                        let error_chunk = ChatCompletionChunkBuilder::new()
-                            .id(completion_id.clone())
-                            .created(created_timestamp)
-                            .model(payload.model.clone())
-                            .choices(vec![ChatCompletionChunkChoice {
-                                delta: ChatCompletionChunkChoiceDelta::Content {
-                                    content: String::new(),
-                                },
-                                index: 0,
-                                finish_reason: Some("error".to_string()),
-                            }])
-                            .build();
-                        // If serialization fails here, there's not much we can do
-                        if let Ok(sse_event) = create_sse_event(&error_chunk) {
-                            yield Ok(sse_event);
-                        }
+                        yield Err(StreamError(format!("Stream operation failed: {}", e)));
                         break;
                     }
                 }
@@ -388,7 +379,7 @@ fn create_sse_event(chunk: &ChatCompletionChunk) -> anyhow::Result<Event> {
 
 async fn chat_completions(
     Json(payload): Json<ChatCompletionsRequest>,
-) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
+) -> Result<Sse<impl Stream<Item = Result<Event, StreamError>>>, AppError> {
     let provider = BedrockProvider::new().await;
     Ok(provider.chat_completions_stream(payload).await?)
 }
