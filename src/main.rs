@@ -64,7 +64,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Default)]
 pub struct ChatCompletionChunk {
     id: String,
     object: String,
@@ -78,23 +78,10 @@ pub struct ChatCompletionChunkBuilder {
     chunk: ChatCompletionChunk,
 }
 
-impl Default for ChatCompletionChunkBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ChatCompletionChunkBuilder {
     pub fn new() -> Self {
         ChatCompletionChunkBuilder {
-            chunk: ChatCompletionChunk {
-                id: Uuid::new_v4().to_string(),
-                object: CHAT_COMPLETION_OBJECT.to_string(),
-                created: Utc::now().timestamp(),
-                model: String::new(),
-                choices: Vec::new(),
-                usage: None,
-            },
+            chunk: ChatCompletionChunk::default(),
         }
     }
 
@@ -205,9 +192,8 @@ impl ChatProvider for BedrockProvider {
             loop {
                 match stream.recv().await {
                     Ok(Some(event)) => {
-                        if let sse_event = handle_stream_event(&payload.model, &completion_id, created_timestamp, event) {
-                            yield Ok(sse_event);
-                        }
+                        let sse_event = handle_stream_event(&payload.model, &completion_id, created_timestamp, event);
+                        yield Ok(sse_event);
                     }
                     Ok(None) => {
                         // Stream completed normally
@@ -307,8 +293,6 @@ fn handle_stream_event(
             ChatCompletionChunkBuilder::new()
                 .id(completion_id.to_string())
                 .created(created_timestamp)
-                .id(completion_id.to_string())
-                .created(created_timestamp)
                 .model(model.to_string())
                 .choices(vec![ChatCompletionChunkChoice {
                     delta: ChatCompletionChunkChoiceDelta::Content { content },
@@ -371,9 +355,7 @@ fn handle_stream_event(
                 ChatCompletionChunkBuilder::new()
                     .id(completion_id.to_string())
                     .created(created_timestamp)
-                    .id(completion_id.to_string())
                     .object(CHAT_COMPLETION_OBJECT.to_string())
-                    .created(created_timestamp)
                     .model(model.to_string())
                     .choices(vec![ChatCompletionChunkChoice {
                         delta: ChatCompletionChunkChoiceDelta::Content {

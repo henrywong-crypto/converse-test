@@ -1,3 +1,4 @@
+use aws_sdk_bedrockruntime::types::{ContentBlock, SystemContentBlock};
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
@@ -76,8 +77,6 @@ where
     }
     deserializer.deserialize_any(StringOrArray(PhantomData))
 }
-
-use aws_sdk_bedrockruntime::types::{ContentBlock, SystemContentBlock};
 
 pub fn process_content(content: &MessageContent) -> Vec<ContentBlock> {
     match content {
