@@ -1,14 +1,8 @@
-// Constants
-// Message constants
-const CHAT_COMPLETION_OBJECT: &str = "chat.completion.chunk";
-const ASSISTANT_ROLE: &str = "assistant";
-const SSE_DONE_MESSAGE: &str = "[DONE]";
-const STOP_REASON: &str = "stop";
-
+use crate::constants::*;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_bedrockruntime::{
-    Client,
+    self, Client,
     types::{ContentBlock, ConversationRole, Message, SystemContentBlock},
 };
 use axum::{
@@ -31,6 +25,7 @@ use thiserror::Error;
 use uuid::Uuid;
 use void::Void;
 
+mod constants;
 mod good;
 use good::{
     ChatCompletionsRequest, Content, MessageContent, OpenaiMessage, Role, process_content,
@@ -41,6 +36,10 @@ use good::{
 pub enum ApiError {
     #[error("Internal server error: {0}")]
     Internal(#[from] anyhow::Error),
+    #[error("Bedrock API error: {0}")]
+    BedrockError(String),
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
     #[error("Stream error: {0}")]
     StreamError(String),
 }
@@ -49,6 +48,10 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let (status, error_message) = match self {
             ApiError::Internal(ref e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            ApiError::BedrockError(ref e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            ApiError::SerializationError(ref e) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
             ApiError::StreamError(ref e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         };
 
@@ -111,7 +114,7 @@ impl ChatCompletionChunkBuilder {
     }
 
     pub fn usage(mut self, usage: Usage) -> Self {
-        self.chunk.usage = Some(usage);
+        self.chunk.usage = Some(usage); // Keep this as Some(usage) for now
         self
     }
 
@@ -185,15 +188,37 @@ impl ChatProvider for BedrockProvider {
             .set_messages(Some(messages))
             .send()
             .await
-            .map_err(|e| ApiError::Internal(e.into()))?
+            .map_err(|e| ApiError::BedrockError(e.to_string()))?
             .stream;
 
         let sse_stream = async_stream::stream! {
             loop {
                 match stream.recv().await {
                     Ok(Some(event)) => {
-                        let sse_event = handle_stream_event(&payload.model, &completion_id, created_timestamp, event);
-                        yield Ok(sse_event);
+                        match handle_stream_event(&payload.model, &completion_id, created_timestamp, event) {
+                            Ok(sse_event) => yield Ok(sse_event),
+                            Err(e) => {
+                                tracing::error!("Error handling stream event: {}", e);
+                                // Attempt to send an error chunk
+                                let error_chunk = ChatCompletionChunkBuilder::new()
+                                    .id(completion_id.clone())
+                                    .created(created_timestamp)
+                                    .model(payload.model.clone())
+                                    .choices(vec![ChatCompletionChunkChoice {
+                                        delta: ChatCompletionChunkChoiceDelta::Content {
+                                            content: String::new(),
+                                        },
+                                        index: 0,
+                                        finish_reason: Some("error".to_string()),
+                                    }])
+                                    .build();
+                                // If serialization fails here, there's not much we can do, but at least log it
+                                if let Ok(sse_event) = create_sse_event(&error_chunk) {
+                                    yield Ok(sse_event);
+                                }
+                                break;
+                            }
+                        }
                     }
                     Ok(None) => {
                         // Stream completed normally
@@ -214,7 +239,10 @@ impl ChatProvider for BedrockProvider {
                                 finish_reason: Some("error".to_string()),
                             }])
                             .build();
-                        yield Ok(create_sse_event(&error_chunk));
+                        // If serialization fails here, there's not much we can do
+                        if let Ok(sse_event) = create_sse_event(&error_chunk) {
+                            yield Ok(sse_event);
+                        }
                         break;
                     }
                 }
@@ -226,8 +254,6 @@ impl ChatProvider for BedrockProvider {
         Ok(Sse::new(sse_stream))
     }
 }
-
-const DEFAULT_AWS_REGION: &str = "us-east-1";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -257,19 +283,21 @@ fn process_conversation_message(msg: &OpenaiMessage) -> Option<Message> {
 }
 
 fn process_messages(messages: &[OpenaiMessage]) -> (Vec<SystemContentBlock>, Vec<Message>) {
-    let (system_blocks, conversation_messages): (Vec<_>, Vec<_>) =
-        messages.iter().partition_map(|msg| match msg.role {
-            // System messages go to the left branch
-            Role::System => Either::Left(process_system_content(&msg.content)),
-            // Conversation messages (User/Assistant) go to the right branch
-            Role::Assistant | Role::User => Either::Right(process_conversation_message(msg)),
-        });
-
-    (
-        // Flatten the nested system blocks into a single vector
-        system_blocks.into_iter().flatten().collect(),
-        // Filter out None values from conversation messages
-        conversation_messages.into_iter().flatten().collect(),
+    messages.iter().fold(
+        (Vec::new(), Vec::new()),
+        |(mut system_blocks, mut conversation_messages), msg| {
+            match msg.role {
+                Role::System => {
+                    system_blocks.extend(process_system_content(&msg.content));
+                }
+                Role::Assistant | Role::User => {
+                    if let Some(message) = process_conversation_message(msg) {
+                        conversation_messages.push(message);
+                    }
+                }
+            }
+            (system_blocks, conversation_messages)
+        },
     )
 }
 
@@ -279,119 +307,93 @@ fn handle_stream_event(
     completion_id: &str,
     created_timestamp: i64,
     event: aws_sdk_bedrockruntime::types::ConverseStreamOutput,
-) -> Event {
-    let chunk = match event {
-        aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockDelta(event) => {
-            let content = event
-                .delta
-                .and_then(|d| match d {
-                    aws_sdk_bedrockruntime::types::ContentBlockDelta::Text(text) => Some(text),
-                    _ => None,
-                })
-                .unwrap_or_default();
+) -> Result<Event, ApiError> {
+    // Initialize builder with common fields
+    let mut builder = ChatCompletionChunkBuilder::new()
+        .id(completion_id.to_string())
+        .object(CHAT_COMPLETION_OBJECT.to_string())
+        .created(created_timestamp)
+        .model(model.to_string());
 
-            ChatCompletionChunkBuilder::new()
-                .id(completion_id.to_string())
-                .created(created_timestamp)
-                .model(model.to_string())
-                .choices(vec![ChatCompletionChunkChoice {
+    builder =
+        match event {
+            aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockDelta(event) => {
+                let content = event
+                    .delta
+                    .and_then(|d| match d {
+                        aws_sdk_bedrockruntime::types::ContentBlockDelta::Text(text) => Some(text),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+
+                builder.choices(vec![ChatCompletionChunkChoice {
                     delta: ChatCompletionChunkChoiceDelta::Content { content },
                     index: 0,
                     finish_reason: None,
                 }])
-                .build()
-        }
-        aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStart(_)
-        | aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStart(_) => {
-            ChatCompletionChunkBuilder::new()
-                .id(completion_id.to_string())
-                .created(created_timestamp)
-                .model(model.to_string())
+            }
+            aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStart(_)
+            | aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStart(_) => builder
                 .choices(vec![ChatCompletionChunkChoice {
                     delta: ChatCompletionChunkChoiceDelta::Role {
                         role: ASSISTANT_ROLE.to_string(),
                     },
                     index: 0,
                     finish_reason: None,
-                }])
-                .build()
-        }
-        aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStop(_)
-        | aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStop(_) => {
-            ChatCompletionChunkBuilder::new()
-                .id(completion_id.to_string())
-                .created(created_timestamp)
-                .model(model.to_string())
+                }]),
+            aws_sdk_bedrockruntime::types::ConverseStreamOutput::ContentBlockStop(_)
+            | aws_sdk_bedrockruntime::types::ConverseStreamOutput::MessageStop(_) => builder
                 .choices(vec![ChatCompletionChunkChoice {
                     delta: ChatCompletionChunkChoiceDelta::Content {
                         content: String::new(),
                     },
                     index: 0,
                     finish_reason: Some(STOP_REASON.to_string()),
-                }])
-                .build()
-        }
-        aws_sdk_bedrockruntime::types::ConverseStreamOutput::Metadata(event) => {
-            if let Some(usage) = event.usage {
-                ChatCompletionChunkBuilder::new()
-                    .model(model.to_string())
-                    .choices(vec![ChatCompletionChunkChoice {
-                        delta: ChatCompletionChunkChoiceDelta::Content {
-                            content: String::new(),
-                        },
-                        index: 0,
-                        finish_reason: None,
-                    }])
-                    .usage(Usage {
+                }]),
+            aws_sdk_bedrockruntime::types::ConverseStreamOutput::Metadata(event) => {
+                let base_builder = builder.choices(vec![ChatCompletionChunkChoice {
+                    delta: ChatCompletionChunkChoiceDelta::Content {
+                        content: String::new(),
+                    },
+                    index: 0,
+                    finish_reason: None,
+                }]);
+
+                if let Some(usage) = event.usage {
+                    base_builder.usage(Usage {
                         prompt_tokens: usage.input_tokens,
                         completion_tokens: usage.output_tokens,
                         total_tokens: usage.total_tokens,
                         completion_tokens_details: None,
                         prompt_tokens_details: None,
                     })
-                    .build()
-            } else {
-                tracing::warn!("No usage data in Metadata event");
-                ChatCompletionChunkBuilder::new()
-                    .id(completion_id.to_string())
-                    .created(created_timestamp)
-                    .object(CHAT_COMPLETION_OBJECT.to_string())
-                    .model(model.to_string())
-                    .choices(vec![ChatCompletionChunkChoice {
-                        delta: ChatCompletionChunkChoiceDelta::Content {
-                            content: String::new(),
-                        },
-                        index: 0,
-                        finish_reason: None,
-                    }])
-                    .build() // No usage data
+                } else {
+                    tracing::warn!("No usage data in Metadata event");
+                    base_builder
+                }
             }
-        }
-        _ => {
-            tracing::warn!("Unknown stream chunk type");
-            ChatCompletionChunkBuilder::new()
-                .model(model.to_string())
-                .choices(vec![ChatCompletionChunkChoice {
+            _ => {
+                tracing::warn!("Unknown stream chunk type");
+                builder.choices(vec![ChatCompletionChunkChoice {
                     delta: ChatCompletionChunkChoiceDelta::Content {
                         content: String::new(),
                     },
                     index: 0,
                     finish_reason: None,
                 }])
-                .build() // Handle unknown types
-        }
-    };
+            }
+        };
+
+    let chunk = builder.build();
 
     create_sse_event(&chunk)
 }
 
 /// Creates an SSE event from a chunk
-fn create_sse_event(chunk: &ChatCompletionChunk) -> Event {
-    let data = serde_json::to_string(&chunk).unwrap_or_else(|e| {
-        tracing::error!("Failed to serialize chunk: {}", e);
-        String::from("{}")
-    });
-    Event::default().data(data)
+fn create_sse_event(chunk: &ChatCompletionChunk) -> Result<Event, ApiError> {
+    serde_json::to_string(&chunk)
+        .map(|data| Event::default().data(data))
+        .map_err(|e| ApiError::SerializationError(e.to_string()))
 }
 
 async fn chat_completions(
