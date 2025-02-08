@@ -32,38 +32,28 @@ use good::{
     process_system_content,
 };
 
-#[derive(Error, Debug)]
-pub enum ApiError {
-    #[error("Internal server error: {0}")]
-    Internal(#[from] anyhow::Error),
-    #[error("Bedrock API error: {0}")]
-    BedrockError(String),
-    #[error("Serialization error: {0}")]
-    SerializationError(String),
-    #[error("Stream error: {0}")]
-    StreamError(String),
+// Make our own error that wraps `anyhow::Error`.
+struct AppError(anyhow::Error);
+
+// Tell axum how to convert `AppError` into a response.
+impl IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Something went wrong: {}", self.0),
+        )
+            .into_response()
+    }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> axum::response::Response {
-        let (status, error_message) = match self {
-            ApiError::Internal(ref e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            ApiError::BedrockError(ref e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            ApiError::SerializationError(ref e) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-            }
-            ApiError::StreamError(ref e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-        };
-
-        let body = Json(serde_json::json!({
-            "error": {
-                "message": error_message,
-                "type": "server_error",
-                "status": status.as_u16()
-            }
-        }));
-
-        (status, body).into_response()
+// This enables using `?` on functions that return `Result<_, anyhow::Error>` to turn them into
+// `Result<_, AppError>`. That way you don't need to do that manually.
+impl<E> From<E> for AppError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(err: E) -> Self {
+        Self(err.into())
     }
 }
 
@@ -151,7 +141,7 @@ pub trait ChatProvider {
     async fn chat_completions_stream(
         self,
         request: ChatCompletionsRequest,
-    ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>;
+    ) -> anyhow::Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>>;
 }
 
 pub struct BedrockProvider {}
@@ -167,7 +157,7 @@ impl ChatProvider for BedrockProvider {
     async fn chat_completions_stream(
         self,
         payload: ChatCompletionsRequest,
-    ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
+    ) -> anyhow::Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>> {
         let (system_content_blocks, messages) = process_messages(&payload.messages);
 
         // Generate consistent id and timestamp for all chunks
@@ -188,7 +178,7 @@ impl ChatProvider for BedrockProvider {
             .set_messages(Some(messages))
             .send()
             .await
-            .map_err(|e| ApiError::BedrockError(e.to_string()))?
+            .map_err(|e| anyhow::anyhow!("Bedrock API error: {}", e))?
             .stream;
 
         let sse_stream = async_stream::stream! {
@@ -307,7 +297,7 @@ fn handle_stream_event(
     completion_id: &str,
     created_timestamp: i64,
     event: aws_sdk_bedrockruntime::types::ConverseStreamOutput,
-) -> Result<Event, ApiError> {
+) -> anyhow::Result<Event> {
     // Initialize builder with common fields
     let mut builder = ChatCompletionChunkBuilder::new()
         .id(completion_id.to_string())
@@ -390,15 +380,15 @@ fn handle_stream_event(
 }
 
 /// Creates an SSE event from a chunk
-fn create_sse_event(chunk: &ChatCompletionChunk) -> Result<Event, ApiError> {
+fn create_sse_event(chunk: &ChatCompletionChunk) -> anyhow::Result<Event> {
     serde_json::to_string(&chunk)
         .map(|data| Event::default().data(data))
-        .map_err(|e| ApiError::SerializationError(e.to_string()))
+        .map_err(|e| anyhow::anyhow!("Serialization error: {}", e))
 }
 
 async fn chat_completions(
     Json(payload): Json<ChatCompletionsRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
     let provider = BedrockProvider::new().await;
-    provider.chat_completions_stream(payload).await
+    Ok(provider.chat_completions_stream(payload).await?)
 }
